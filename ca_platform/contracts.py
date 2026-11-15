@@ -228,6 +228,22 @@ class ClaimsLLM(BaseModel):
     claims: list[ClaimLLM]
 
 
+class IdeaLLM(BaseModel):
+    company_mention: str                       # exactly as written in the article
+    stance: Literal["buy", "accumulate", "hold", "reduce", "sell", "avoid", "neutral_mention"]
+    target_price: Optional[float] = None
+    horizon_text: Optional[str] = None
+    recommended_by: Optional[str] = None       # broker / analyst / author, when stated
+    rationale: str
+    passage_id: str
+    quote: str                                 # verbatim 4-25 words from that passage
+
+
+class IdeasLLM(BaseModel):
+    article_type: Literal["stock_recommendations", "sector_or_theme", "single_company", "market_commentary", "other"]
+    ideas: list[IdeaLLM]
+
+
 # ----------------------------------------------------- browser intake ---
 
 class CapturePassage(BaseModel):

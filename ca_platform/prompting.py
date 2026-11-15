@@ -95,9 +95,10 @@ def brain_view(role: str, b: Bundle, pre: list[dict], prior: list[dict]) -> tupl
     if role == "news":  # News sees only the return/price-reaction slice of computed features
         items = [e for e in items if e.kind != "computed_feature" or e.title.startswith("Price reaction")]
     rendered, omitted, total = [], [], 0
+    cap = int((config("user").get("analysis") or {}).get("max_view_chars", MAX_VIEW_CHARS))
     for e in items:
         r = render_evidence([e])
-        if total + len(r) > MAX_VIEW_CHARS:
+        if total + len(r) > cap:
             omitted.append(e.id)
             continue
         rendered.append(r)

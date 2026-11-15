@@ -174,14 +174,19 @@ async function fetchQueue() {
   if (!$('#attest').checked) { msg('Tick the personal-research attestation before fetching.', 'bad'); return; }
   if (!(await perm.catch(() => false))) { msg('ET site access is needed to read queued articles.', 'bad'); return; }
   await refreshQueue();
-  const todo = queueRun.items.filter((x) => x.st === 'waiting');
-  if (!todo.length) { msg('Nothing queued. Add links on the Personal CA Research inbox page or with "Add this tab".'); return; }
+  if (!queueRun.items.some((x) => x.st === 'waiting')) { msg('Nothing queued. Add links on the Personal CA ET Prime / Research inbox page or with "Add this tab".'); return; }
+  const cfg = await call('/v1/research/settings').catch(() => ({ scan_max_links: 15 }));
   queueRun.active = true; queueRun.cancel = false;
   $('#q-fetch').disabled = true; $('#q-cancel').hidden = false;
-  let ok = 0, failed = 0;
-  for (const it of todo) {
+  let ok = 0, failed = 0, rounds = 0;
+  // Rounds: a topic scan adds new article items, which are fetched in the next round.
+  while (!queueRun.cancel && rounds < 6) {
+    rounds++;
+    const todo = queueRun.items.filter((x) => x.st === 'waiting');
+    if (!todo.length) break;
+    for (const it of todo) {
     if (queueRun.cancel) { it.st = 'skipped'; it.info = 'stopped by you'; continue; }
-    it.st = 'running'; it.info = 'opening…'; renderQueue();
+    it.st = 'running'; it.info = it.kind === 'scan' ? 'scanning topic page…' : 'opening…'; renderQueue();
     await call(`/v1/research/queue/${it.queue_id}/status`, { method: 'POST', body: JSON.stringify({ status: 'in_progress' }) }).catch(() => {});
     let tab = null;
     try {
@@ -189,6 +194,13 @@ async function fetchQueue() {
       await waitForLoad(tab.id);
       it.info = 'rendering…'; renderQueue();
       await sleep(RENDER_WAIT_MS);
+      if (it.kind === 'scan') {
+        const links = await collectLinks(tab.id, cfg.scan_max_links || 15);
+        const r2 = links.length ? await call('/v1/research/queue', { method: 'POST', body: JSON.stringify({ urls: links.map((l) => l.url), symbol: it.symbol, note: 'from topic scan' }) }) : { added: [] };
+        await call(`/v1/research/queue/${it.queue_id}/status`, { method: 'POST', body: JSON.stringify({ status: 'done' }) }).catch(() => {});
+        it.st = 'ok'; it.info = `found ${links.length} article link(s), queued ${r2.added.length} new`;
+        continue;
+      }
       const r = await extractFromTab(tab.id, 'page');
       if (!r || r.error) throw new Error((r && r.error) || 'capture failed');
       const chars = r.passages.reduce((a, p) => a + p.length, 0);
@@ -213,6 +225,12 @@ async function fetchQueue() {
       await save(); render(); renderQueue();
     }
     if (!queueRun.cancel) await sleep(BETWEEN_PAGES_MS);
+    }
+    // pick up articles added by topic scans
+    const fresh = await call('/v1/research/queue').catch(() => []);
+    const known = new Set(queueRun.items.map((x) => x.queue_id));
+    fresh.filter((x) => !known.has(x.queue_id)).forEach((x) => queueRun.items.push({ ...x, st: 'waiting' }));
+    renderQueue();
   }
   queueRun.active = false;
   $('#q-fetch').disabled = false; $('#q-cancel').hidden = true;
@@ -230,23 +248,26 @@ async function addTabToQueue() {
   } catch (e) { msg(e.message, 'bad'); }
 }
 
+async function collectLinks(tabId, max) {
+  const [res] = await chrome.scripting.executeScript({ target: { tabId }, args: [max], func: (limit) => {
+    const seen = new Set(), out = [];
+    document.querySelectorAll('a[href*="/articleshow/"]').forEach((a) => {
+      const h = a.href.split('#')[0].split('?')[0];
+      const t = (a.innerText || a.title || '').trim().replace(/\s+/g, ' ');
+      if (!h.startsWith('https://economictimes.indiatimes.com/') || seen.has(h) || t.length < 15) return;
+      seen.add(h); out.push({ url: h, title: t.slice(0, 160), prime: h.includes('/prime/') });
+    });
+    out.sort((a, b) => Number(b.prime) - Number(a.prime));   // ET Prime pieces first
+    return out.slice(0, limit);
+  } });
+  return (res && res.result) || [];
+}
+
 async function scanPage() {
   const tab = await activeTab();
   if (!tab) return;
   let links = [];
-  try {
-    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
-      const seen = new Set(), out = [];
-      document.querySelectorAll('a[href*="/articleshow/"]').forEach((a) => {
-        const h = a.href.split('#')[0].split('?')[0];
-        const t = (a.innerText || a.title || '').trim().replace(/\s+/g, ' ');
-        if (!h.startsWith('https://economictimes.indiatimes.com/') || seen.has(h) || t.length < 15) return;
-        seen.add(h); out.push({ url: h, title: t.slice(0, 160) });
-      });
-      return out.slice(0, 40);
-    } });
-    links = (res && res.result) || [];
-  } catch (e) { msg('Cannot read this page. Click "Allow ET access" first.', 'bad'); return; }
+  try { links = await collectLinks(tab.id, 40); } catch (e) { msg('Cannot read this page. Click "Allow ET access" first.', 'bad'); return; }
   if (!links.length) { msg('No ET article links found on this page.', 'bad'); return; }
   $('#scan').innerHTML = `<div class="hint">${links.length} article link(s). Tick the ones you want, then queue them.</div>
     ${links.map((l, i) => `<label class="scan-item"><input type="checkbox" data-scan="${i}"><span>${esc(l.title)}</span></label>`).join('')}

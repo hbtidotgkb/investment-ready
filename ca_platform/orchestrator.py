@@ -200,17 +200,22 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         bs = Budget(led).status()
         ev.log("context", f"Budget: ${bs['spent_usd']:.2f} spent of ${bs['cap_usd']:.2f} this month")
     from .data import kite as kite_mod
+    from .data import kite_mcp
     ks = kite_mod.status() if mode == "live" else {"state": "demo", "message": "Kite not used in DEMO"}
-    ev.log("context", f"Kite: {ks['message']}")
+    ev.log("context", f"Kite Connect: {ks['message']}")
+    mcp_on = mode == "live" and kite_mcp.connected()
+    if mode == "live":
+        ev.log("context", "Kite MCP: " + ("connected (read-only)" if mcp_on else "not connected"))
     holdings_position, pf_status = None, "missing"
-    if mode == "live" and ks["state"] == "connected":
+    if mode == "live" and (ks["state"] == "connected" or mcp_on):
         try:
-            hs = kite_mod.holdings() or []
+            hs = (kite_mod.holdings() if ks["state"] == "connected" else await kite_mcp.holdings()) or []
             pf_status = "available"
             holdings_position = next((h for h in hs if h["symbol"] == symbol), None)
-            ev.log("context", f"Portfolio synced: {len(hs)} holdings; {'position found' if holdings_position else 'no position'} in {symbol}")
+            ev.log("context", f"Portfolio synced via {'Kite Connect' if ks['state'] == 'connected' else 'Kite MCP'}: "
+                   f"{len(hs)} holdings; {'position found' if holdings_position else 'no position'} in {symbol}")
         except Exception as e:
-            ev.log("context", f"Holdings unavailable ({type(e).__name__}) — portfolio context missing")
+            ev.log("context", f"Holdings unavailable ({type(e).__name__}: {str(e)[:100]}) — portfolio context missing")
     if mode == "demo":
         company, sector, isin = demo.DEMO_NAME, demo.DEMO_SECTOR, None
     else:
@@ -237,7 +242,14 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 candles, src = kite_mod.candles(k, symbol), "Zerodha Kite historical_data"
                 ev.log("prices", f"Kite: {len(candles)} daily candles")
             except Exception as e:
-                ev.log("prices", f"Kite candles failed ({type(e).__name__}); falling back to bhavcopy")
+                ev.log("prices", f"Kite candles failed ({type(e).__name__}); falling back")
+        if not candles and mcp_on:
+            try:
+                candles, src = await kite_mcp.candles(symbol), "Zerodha Kite MCP get_historical_data"
+                ev.log("prices", f"Kite MCP: {len(candles)} daily candles")
+            except Exception as e:
+                ev.log("prices", f"Kite MCP candles failed ({str(e)[:120]}); falling back to bhavcopy")
+                candles = []
         if not candles:
             from .data import bhav
             candles, ca_flags = bhav.candles(symbol)

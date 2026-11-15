@@ -96,6 +96,11 @@ def meta():
             "tiers": config("sources")["tiers"], "horizons": config("horizons")["horizons"]}
 
 
+def _kite_mcp_connected() -> bool:
+    from .data import kite_mcp
+    return kite_mcp.connected()
+
+
 @app.get("/api/health")
 def health():
     led = get_ledger()
@@ -107,6 +112,7 @@ def health():
         "openai": {"configured": bool(get_secret("OPENAI_API_KEY"))},
         "panel_missing_keys": missing_keys(PANEL_ROLES),
         "kite": kite_mod.status(),
+        "kite_mcp": {"connected": _kite_mcp_connected()},
         "budget": Budget(led).status(),
         "bhavcopy": {"trading_days": bh["days"], "last": str(bh["last"]) if bh["last"] else None},
         "policies_confirmed": bool(u.get("policies_confirmed")),
@@ -296,8 +302,38 @@ async def run_events(run_id: str, request: Request):
 # ----------------------------------------------------------------- kite ---
 
 @app.get("/api/kite/status")
-def kite_status():
-    return kite_mod.status()
+async def kite_status():
+    from .data import kite_mcp
+    return {"connect": kite_mod.status(), "mcp": await kite_mcp.status()}
+
+
+@app.get("/kite-mcp/login")
+def kite_mcp_login(request: Request):
+    from .data import kite_mcp
+    host = request.headers.get("host", "127.0.0.1:8765")
+    try:
+        return RedirectResponse(kite_mcp.start_login(f"http://{host}/kite-mcp/callback"))
+    except kite_mcp.KiteMCPError as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/kite-mcp/callback")
+def kite_mcp_callback(code: str = "", state: str = "", error: str = ""):
+    from .data import kite_mcp
+    if error or not code:
+        return RedirectResponse("/#/portfolio?kite_mcp=failed")
+    try:
+        kite_mcp.complete_login(code, state)
+    except kite_mcp.KiteMCPError:
+        return RedirectResponse("/#/portfolio?kite_mcp=failed")
+    return RedirectResponse("/#/portfolio?kite_mcp=connected")
+
+
+@app.post("/api/kite-mcp/disconnect")
+def kite_mcp_disconnect():
+    from .data import kite_mcp
+    kite_mcp.clear_token()
+    return {"ok": True}
 
 
 @app.get("/kite/login")
@@ -316,11 +352,110 @@ def kite_callback(request_token: str = "", status: str = ""):
 
 
 @app.get("/api/portfolio/holdings")
-def holdings():
+async def holdings():
+    from .data import kite_mcp
+    st = {"connect": kite_mod.status(), "mcp": await kite_mcp.status()}
     h = kite_mod.holdings()
-    if h is None:
-        return {"status": kite_mod.status(), "holdings": []}
-    return {"status": kite_mod.status(), "holdings": h}
+    if h is not None:
+        return {"status": st, "holdings": h, "via": "Kite Connect"}
+    if st["mcp"]["state"] == "connected":
+        try:
+            return {"status": st, "holdings": await kite_mcp.holdings(), "via": "Kite MCP"}
+        except Exception as e:
+            st["mcp"] = {"state": "error", "message": str(e)[:200]}
+    return {"status": st, "holdings": [], "via": None}
+
+
+# ------------------------------------------------------------ ET lists & ideas ---
+
+class ETLists(BaseModel):
+    news_articles: list[str] = []
+    idea_articles: list[str] = []
+    recapture: bool = False
+
+
+@app.get("/api/et/lists")
+def et_lists():
+    from . import ideas
+    return ideas.load_lists() | {"status": ideas.lists_status()}
+
+
+@app.post("/api/et/lists")
+def et_lists_save(req: ETLists):
+    from . import ideas
+    if len(req.news_articles) > 500:
+        raise HTTPException(400, "at most 500 news articles")
+    return ideas.save_lists(req.news_articles, req.idea_articles, req.recapture)
+
+
+class ScanRequest(BaseModel):
+    symbol: str
+
+
+@app.post("/api/et/scan")
+def et_scan(req: ScanRequest):
+    from . import ideas
+    url = ideas.topic_url(req.symbol)
+    if not url:
+        raise HTTPException(400, f"{req.symbol} not found in the NSE equity list (run `ca equity-master`)")
+    return inbox_mod.queue_add([url], symbol=req.symbol, note="topic scan", kind="scan") | {"topic_url": url}
+
+
+@app.get("/api/ideas")
+async def ideas_get(top: int = 8):
+    from . import ideas
+    return await ideas.rank(top)
+
+
+@app.post("/api/ideas/extract")
+async def ideas_extract(force: bool = False, top: int = 8):
+    from . import ideas
+    gw = Gateway(get_ledger(), run_id="ideas") if not missing_keys(["ideas"]) else None
+    res = await ideas.extract(gw, force=force)
+    return res | await ideas.rank(top)
+
+
+class BatchRequest(BaseModel):
+    symbols: list[str]
+    horizon: str = "medium"
+    loops: int = 1
+    mode: str = "live"
+    ideas: list[dict] = []
+
+
+@app.post("/api/batches")
+async def batch_start(req: BatchRequest):
+    from . import ideas
+    syms = [s for s in req.symbols if s.strip()]
+    if not 1 <= len(syms) <= 10:
+        raise HTTPException(400, "choose 1 to 10 stocks")
+    if req.horizon not in config("horizons")["horizons"] or req.mode not in ("live", "demo") or not 1 <= req.loops <= max_loops():
+        raise HTTPException(400, "invalid horizon, mode or loops")
+    if req.mode == "live":
+        miss = missing_keys(PANEL_ROLES)
+        if miss:
+            raise HTTPException(400, f"Missing API key(s) for the panel: {', '.join(miss)}")
+        need = float(config("user")["budget"]["per_run_reservation_usd"]) * req.loops * len(syms)
+        rem = Budget(get_ledger()).status()["remaining_usd"]
+        if rem < need:
+            raise HTTPException(400, f"Budget: this batch reserves about ${need:.2f} but ${rem:.2f} remains this month")
+    snap = [{"symbol": i.get("symbol"), "why": i.get("why"), "score": i.get("score")} for i in req.ideas][:10]
+    return {"batch_id": ideas.start_batch(syms, req.horizon, req.loops, req.mode, "ideas", snap)}
+
+
+@app.get("/api/batches")
+def batches_list():
+    from . import ideas
+    return ideas.list_batches()
+
+
+@app.get("/api/batches/{batch_id}")
+def batch_get(batch_id: str):
+    from . import ideas
+    b = ideas.get_batch(batch_id)
+    if not b:
+        raise HTTPException(404, "batch not found")
+    return b
 
 
 # ---------------------------------------------------------------- inbox ---
@@ -368,6 +503,7 @@ class QueueRequest(BaseModel):
     urls: list[str]
     symbol: str | None = None
     note: str | None = None
+    kind: str = "article"
 
 
 @app.get("/api/queue")
@@ -379,7 +515,10 @@ def queue_list():
 def queue_add(req: QueueRequest):
     if len(req.urls) > 50:
         raise HTTPException(400, "at most 50 URLs per request")
-    return inbox_mod.queue_add(req.urls, req.symbol, req.note)
+    try:
+        return inbox_mod.queue_add(req.urls, req.symbol, req.note, kind=req.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/queue/{queue_id}/cancel")
@@ -434,13 +573,22 @@ def _require_token(request: Request):
 @app.get("/v1/research/queue")
 def v1_queue(request: Request):
     _require_token(request)
-    return [{k: q[k] for k in ("queue_id", "canonical_url", "symbol", "note", "status")}
+    return [{k: q.get(k) for k in ("queue_id", "canonical_url", "symbol", "note", "status", "kind")}
             for q in inbox_mod.queue_list("pending")]
+
+
+@app.get("/v1/research/settings")
+def v1_settings(request: Request):
+    _require_token(request)
+    return {"scan_max_links": int((config("user").get("inbox") or {}).get("scan_max_links", 15))}
 
 
 @app.post("/v1/research/queue")
 def v1_queue_add(req: QueueRequest):
-    return inbox_mod.queue_add(req.urls[:20], req.symbol, req.note)
+    try:
+        return inbox_mod.queue_add(req.urls[:50], req.symbol, req.note, kind=req.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 class QueueStatus(BaseModel):

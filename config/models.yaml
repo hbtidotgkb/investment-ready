@@ -39,6 +39,7 @@ roles:
   critic:      {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: critic@2.1.0}
   research_qa: {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: research_qa@2.0.0}
   claims:      {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: claims@2.0.0}
+  ideas:       {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: ideas@1.0.0}
 
 # Bounded validation repairs per spec §11 "Validation and retries"
 max_validation_repairs: 2

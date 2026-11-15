@@ -53,6 +53,26 @@ Choose 1–3 loops when starting a run (UI or `ca analyse TCS --loops 2`). Every
 
 The run page has a **tab per loop** with its own progress tracker, plus a **"What changed across loops"** table: evidence, questions searched, decisions, objections, governance coverage and citation integrity. Only the final loop issues a verdict; earlier loops are stored as loop records, so retries never inflate the track record. Cost scales with loops, and the budget reservation is multiplied accordingly.
 
+## ET Prime lists → stock ideas → batch analysis
+
+The **ET Prime & ideas** page holds two lists you can edit any time. They're saved to `data/settings/et_lists.yaml`, which you can also edit by hand.
+
+| List | What happens |
+|---|---|
+| **News articles** (any number) | Each article is captured and joins future analyses of any stock it mentions, or that you link it to, as a news source. |
+| **Stock-idea articles** (about 10, max 20) | Every pick is extracted with a verbatim quote: stance, target, horizon, who recommends it. Picks are ranked across articles, and you see the best 5, 8 or 10. |
+
+Workflow:
+1. Paste links into the lists and click **Save lists & queue new articles**. Only articles not yet captured are queued; **Re-capture all** picks up updated articles as new versions.
+2. In the extension, click **Fetch queued articles**. Each one is read in your own signed-in Chrome.
+3. Click **Extract & rank ideas**. The ranking score is *3 × articles positive (buy or accumulate) − 3 × articles negative + 1 × neutral mentions + 0.5 × named recommenders + target upside*. Upside uses the Kite MCP last price or the bhavcopy close, and is capped. Every mention shows its quote and source article.
+4. Tick the stocks you want, choose horizon, loops and mode, and click **Analyse selected**. A batch runs the full panel on each stock; `ideas.batch_concurrency` sets how many run at once.
+5. The **batch page** shows live progress, then a comparison sorted actionable buys → wait → hold → insufficient data → avoid. Each row links to its full report, and a combined Markdown report is written to `data/reports/`.
+
+**More ET content:** "Find more ET articles for a stock" queues a *topic scan*. The extension opens ET's topic page for that company, collects article links (Prime pieces first, up to `inbox.scan_max_links`) and captures them in the same fetch session. The queue holds up to 100 articles, and the News brain can now read about 400k characters of evidence (`analysis.max_view_chars`).
+
+Ideas are attributed opinions from your articles. They decide *what to look at*, never the decision: every pick still goes through all the evidence, panel and rule gates.
+
 ## Best sources
 
 Each verdict shows a ranked **"Best sources for this decision"** list. You can show 5, 8 or 10 (default 8, set in `config/user.yaml → display.top_sources`). The score is *source tier × how often the panel relied on it (verified quotes count most) × recency*, and each entry explains its rank, e.g. "Official / exchange · cited 4× (3 verified) by forensic, head · 12 days old". Computed prices and technicals are excluded from the ranking. Every source remains in the Sources tab.
@@ -124,8 +144,10 @@ The extension reads rendered, visible text only. It does not read cookies, hidde
 
 ## Kite
 
-- **Batch / UI:** create a Kite Connect app with redirect `http://127.0.0.1:8765/kite/callback`, then run `ca secrets set KITE_API_KEY` and `ca secrets set KITE_API_SECRET`, and log in from the Portfolio page. Sessions expire daily. The adapter exposes only read operations; `place_order` and the other order methods raise `PermissionError`, and a test enforces this.
-- **Chat (Claude Code):** `.mcp.json` connects the hosted Kite MCP (`https://mcp.kite.trade/mcp`). `.claude/settings.json` denies every order tool. The skill in `skill/india-stock-analyst/` makes `ca` the chat front door.
+- **Kite MCP (recommended, free):** on the Portfolio page, click **Connect Kite (MCP)**. The platform acts as an MCP client of Zerodha's hosted server (`https://mcp.kite.trade/mcp`), using the standard MCP OAuth flow: dynamic client registration, then authorization code with PKCE. You log in on Zerodha's page, and the token stays on your laptop, in the OS keychain or else `data/secrets/`. This connection provides holdings, LTP/quotes and daily candles. Only read tools in an allowlist can be called; order, GTT and MF-order tools are refused in code, and tests enforce this. Tool arguments are matched against each tool's live schema, so a renamed parameter fails loudly.
+- **Kite Connect (optional, paid data):** create a Kite Connect app with redirect `http://127.0.0.1:8765/kite/callback`, run `ca secrets set KITE_API_KEY` and `ca secrets set KITE_API_SECRET`, then log in from the Portfolio page. The adapter is read-only by construction.
+- **Price source order** in analyses: Kite Connect → Kite MCP → NSE bhavcopy.
+- **Chat (Claude Code):** `.mcp.json` connects the same hosted Kite MCP for chat, and `.claude/settings.json` denies every order tool there.
 
 ## Layout
 

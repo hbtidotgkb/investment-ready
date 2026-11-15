@@ -36,6 +36,15 @@ Build 0.2.0 · 15 November 2026. This file records how this build maps to
 | Best sources (5/8/10) | Display only. Ranking formula in `outputs.rank_sources`; nothing is dropped from the bundle |
 | ET article queue + "scan page" + manual stock linking + auto claim extraction | The spec's planned "guided exploration" (§7): user-selected pages, visible and sequential, cancellable, stops at access challenges, at most 20 pending. Capture still happens only in the user's own browser |
 
+## Added in 0.4.0 (user requests, 15 Nov 2026)
+
+| Feature | Notes |
+|---|---|
+| Two editable ET lists (news, stock ideas) | `data/settings/et_lists.yaml`. Saving queues only uncaptured articles; "re-capture" creates new versions, never overwrites |
+| Idea extraction + ranking + batch analysis | Model extraction (role `ideas`, prompt `ideas@1.0.0`) with verbatim-quote checks; a heuristic mention-only fallback when no key. A transparent formula ranks the stocks. Each pick goes through the full panel — spec §5: signals never override gates. This is effectively the spec's `recommend` mode, with your ET articles as the screen |
+| Topic scans and higher limits | Queue limit 100 (spec default was 20), 15 links per topic scan, 400k chars of evidence per brain. **Spec deviation at your request.** The ET terms concern (below) applies more strongly the more is captured |
+| Kite MCP as a platform data source | The hosted server requires MCP OAuth; implemented with PKCE and dynamic registration. Read-tool allowlist. **Not yet verified end-to-end:** the login and tool calls need your Zerodha login; the authorize step was confirmed to reach Zerodha's login page |
+
 ## Deliberate refinements (please confirm)
 
 1. **Rejecting an objection requires a verified quote.** If the Head rejects a Critic objection, code downgrades it to `unresolved` unless the rejection cites a passage whose quote is found verbatim. The spec says "a rhetorical reply is not a passed test"; this is the strict, code-checkable version.

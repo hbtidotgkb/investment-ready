@@ -17,13 +17,20 @@ budget:
 analysis:
   default_loops: 1                       # loops per run (UI lets you pick 1..max_loops)
   max_loops: 3                           # each loop re-fetches all evidence; cost scales with loops
+  max_view_chars: 400000                 # evidence text one brain may read (~100k tokens); more ET captures fit
 
 display:
   top_sources: 8                         # "best sources" shown on the verdict (5..10)
 
 inbox:
   auto_extract_claims: true              # extract attributed claims after an attested capture arrives
-  queue_max_pending: 20                  # ET article queue (spec §7 future budget: 20 pages/session)
+  queue_max_pending: 100                 # ET article queue (raised from the spec's 20-page default at user request)
+  scan_max_links: 15                     # article links taken from one ET topic/listing page scan
+
+ideas:
+  max_idea_articles: 20                  # stock-idea article list (you asked for ~10)
+  default_top: 8                         # best ideas shown (5..10)
+  batch_concurrency: 1                   # panel analyses run at once in a batch (raise carefully: cost/rate limits)
 
 service:
   host: 127.0.0.1                        # loopback only (spec N14)

@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS loop_records (run_id VARCHAR, loop INTEGER, created_a
 CREATE TABLE IF NOT EXISTS capture_queue (queue_id VARCHAR PRIMARY KEY, url VARCHAR, canonical_url VARCHAR,
   symbol VARCHAR, note VARCHAR, status VARCHAR, created_at VARCHAR, updated_at VARCHAR, source_id VARCHAR,
   version INTEGER, error VARCHAR);
+ALTER TABLE capture_queue ADD COLUMN IF NOT EXISTS kind VARCHAR DEFAULT 'article';
+CREATE TABLE IF NOT EXISTS idea_mentions (mention_id VARCHAR PRIMARY KEY, source_id VARCHAR, version INTEGER,
+  symbol VARCHAR, created_at VARCHAR, method VARCHAR, body JSON);
+CREATE TABLE IF NOT EXISTS batches (batch_id VARCHAR PRIMARY KEY, created_at VARCHAR, status VARCHAR,
+  params JSON, items JSON, report_path VARCHAR);
 CREATE TABLE IF NOT EXISTS alerts (alert_id VARCHAR PRIMARY KEY, created_at VARCHAR, symbol VARCHAR,
   type VARCHAR, message VARCHAR, acknowledged BOOLEAN);
 """

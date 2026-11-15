@@ -118,12 +118,15 @@ def _queue_set(queue_id: str, status: str, **kw) -> None:
                          [status, iso(), *kw.values(), queue_id])
 
 
-def queue_add(urls: list[str], symbol: str | None = None, note: str | None = None) -> dict:
-    """Queue article URLs for the extension to capture in the user's own signed-in browser.
+def queue_add(urls: list[str], symbol: str | None = None, note: str | None = None, kind: str = "article") -> dict:
+    """Queue URLs for the extension to open in the user's own signed-in browser.
+    kind: 'article' (capture it) or 'scan' (collect article links from a topic/listing page and queue them).
     ET hosts only (the extension's optional permission); duplicates of pending items are skipped."""
     from .settings import config
+    if kind not in ("article", "scan"):
+        raise ValueError("kind must be article or scan")
     led = get_ledger()
-    limit = int((config("user").get("inbox") or {}).get("queue_max_pending", 20))
+    limit = int((config("user").get("inbox") or {}).get("queue_max_pending", 100))
     pending = led.fetchone("SELECT COUNT(*) AS n FROM capture_queue WHERE status IN ('pending','in_progress')")["n"]
     added, rejected = [], []
     for raw in urls:
@@ -145,9 +148,10 @@ def queue_add(urls: list[str], symbol: str | None = None, note: str | None = Non
             rejected.append({"url": raw, "reason": f"Queue limit {limit} reached"})
             continue
         qid = "q-" + uuid.uuid4().hex[:10]
-        led.execute("INSERT INTO capture_queue VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        led.execute("INSERT INTO capture_queue (queue_id, url, canonical_url, symbol, note, status, created_at, updated_at, "
+                    "source_id, version, error, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     [qid, raw, cu, (symbol or "").upper().strip() or None, (note or "")[:300] or None, "pending",
-                     iso(), iso(), None, None, None])
+                     iso(), iso(), None, None, None, kind])
         pending += 1
         added.append({"queue_id": qid, "url": cu})
     return {"added": added, "rejected": rejected}
@@ -161,7 +165,7 @@ def queue_list(status: str | None = None) -> list[dict]:
 
 
 def queue_update(queue_id: str, status: str, error: str | None = None) -> None:
-    if status not in ("pending", "in_progress", "failed", "cancelled"):
+    if status not in ("pending", "in_progress", "failed", "cancelled", "done"):
         raise ValueError("invalid status")
     _queue_set(queue_id, status, error=(error or "")[:500] or None)
 

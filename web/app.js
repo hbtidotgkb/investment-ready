@@ -62,13 +62,13 @@ const FIX_HINTS = {
 const roleModel = (role) => (HEALTH && HEALTH.models && HEALTH.models[role]) || '';
 
 /* --------------------------------------------------------------- router */
-const ROUTES = { '': viewHome, runs: viewRuns, run: viewRun, inbox: viewInbox, source: viewSource, portfolio: viewPortfolio, system: viewSystem };
+const ROUTES = { '': viewHome, runs: viewRuns, run: viewRun, inbox: viewInbox, source: viewSource, portfolio: viewPortfolio, system: viewSystem, et: viewET, batch: viewBatch };
 let CLEANUP = null;
 async function route() {
   if (CLEANUP) { CLEANUP(); CLEANUP = null; }
   const [path] = location.hash.replace(/^#\/?/, '').split('?');
   const [name, ...rest] = path.split('/');
-  $$('#nav a').forEach((a) => a.classList.toggle('active', (a.dataset.route === (name || 'home')) || (name === 'run' && a.dataset.route === 'runs') || (name === 'source' && a.dataset.route === 'inbox')));
+  $$('#nav a').forEach((a) => a.classList.toggle('active', (a.dataset.route === (name || 'home')) || (name === 'run' && a.dataset.route === 'runs') || (name === 'source' && a.dataset.route === 'inbox') || (name === 'batch' && a.dataset.route === 'et')));
   const fn = ROUTES[name] || viewHome;
   closeDrawer();
   try { await fn(...rest); } catch (e) { $('#app').innerHTML = `<div class="card notice bad">${esc(e.message)}</div>`; }
@@ -664,20 +664,166 @@ function claimsHtml(cs) {
     <div class="small"><b>Verify:</b> ${esc(c.verification_task)}</div></div>`).join('');
 }
 
+/* ------------------------------------------------------------- ET Prime */
+const STATE_PILL = { captured: 'good', pending: 'info', in_progress: 'info', done: 'good', failed: 'bad', cancelled: '', not_captured: 'warn' };
+
+function listStatusTable(rows) {
+  if (!rows.length) return '<div class="empty small">No articles in this list yet.</div>';
+  return `<div class="tbl-wrap"><table><tbody>${rows.map((r) => `<tr>
+    <td><span class="pill ${STATE_PILL[r.state] || ''}">${esc(r.state.replace('_', ' '))}</span>${r.requeued ? ' <span class="pill info">re-queued</span>' : ''}</td>
+    <td class="small">${r.title ? `<b>${esc(r.title)}</b><br>` : ''}<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.url.replace('https://economictimes.indiatimes.com', 'ET').slice(0, 80))}</a>
+      ${r.error ? `<div class="res fail">${esc(r.error)}</div>` : ''}</td>
+    <td class="small">${r.passages ? `${r.passages} passages` : ''}</td>
+    <td>${(r.stocks || []).map((s) => `<span class="pill info">${esc(s)}</span>`).join(' ')}</td>
+    <td>${r.source_id ? `<a class="btn sm" href="#/source/${esc(r.source_id)}">View</a>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+let ET = { top: null, ranking: null, picked: new Set() };
+
+async function viewET() {
+  const [lists, batches] = await Promise.all([api('/api/et/lists'), api('/api/batches').catch(() => [])]);
+  ET.top = ET.top || store.get('ca-idea-top', (HEALTH && HEALTH.display && HEALTH.display.top_sources) || 8);
+  const st = lists.status;
+  const pending = [...st.news_articles, ...st.idea_articles].filter((r) => ['pending', 'in_progress', 'not_captured'].includes(r.state)).length;
+  $('#app').innerHTML = `
+  <div class="card"><h2>ET Prime &amp; stock ideas</h2>
+    <p class="muted">Two lists you can edit any time (saved to <code>${esc(st.file)}</code>, also editable by hand). Saving queues every article not yet captured. Then open the Personal CA extension in Chrome and click <b>Fetch queued articles</b> — it reads each article in <i>your</i> signed-in browser and sends it here.</p>
+    ${pending ? `<div class="notice info">${pending} article(s) waiting to be captured — open the extension and click <b>Fetch queued articles</b>.</div>` : ''}
+    <div class="grid g2">
+      <div><h3>1 · News articles <span class="muted small">(${lists.news_articles.length})</span></h3>
+        <p class="small muted">Any ET / ET Prime article. Each becomes a news source for whichever stock it mentions (or the stock you link it to) in future analyses.</p>
+        <textarea id="l-news" rows="7" style="width:100%" placeholder="One ET link per line">${esc(lists.news_articles.join('\n'))}</textarea></div>
+      <div><h3>2 · Stock-idea articles <span class="muted small">(${lists.idea_articles.length}, about 10)</span></h3>
+        <p class="small muted">"Stocks to buy" style pieces. Every pick is extracted with a verbatim quote, ranked across articles, and you choose which to analyse.</p>
+        <textarea id="l-ideas" rows="7" style="width:100%" placeholder="One ET Prime link per line">${esc(lists.idea_articles.join('\n'))}</textarea></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="l-save">Save lists &amp; queue new articles</button><button class="btn" id="l-recap" title="Queue every listed article again; changed content becomes a new version">Re-capture all</button><span class="small muted" id="l-msg"></span></div>
+    <details style="margin-top:12px"><summary>Capture status — news (${st.news_articles.length}) · ideas (${st.idea_articles.length})</summary>
+      <h4 style="margin-top:10px">News articles</h4>${listStatusTable(st.news_articles)}
+      <h4 style="margin-top:10px">Stock-idea articles</h4>${listStatusTable(st.idea_articles)}</details>
+    <div class="row" style="margin-top:12px"><b>Find more ET articles for a stock:</b><input id="scan-sym" type="text" placeholder="e.g. TCS" style="width:120px;text-transform:uppercase"><button class="btn sm" id="scan-go">Queue a topic scan</button>
+      <span class="small muted">The extension opens ET's topic page for that company, collects article links (Prime first) and captures them.</span></div>
+  </div>
+  <div class="card"><div class="row"><h2 style="margin:0">Best stock ideas from your idea articles</h2><span class="spacer"></span>
+      <span class="small muted">show</span><div class="seg" id="i-top">${[5, 8, 10].map((k) => `<button data-n="${k}" class="${k === ET.top ? 'on' : ''}">${k}</button>`).join('')}</div>
+      <button class="btn primary" id="i-extract">Extract &amp; rank ideas</button></div>
+    <p class="small muted">Score = 3 × articles positive (buy/accumulate) − 3 × articles negative + 1 × neutral mentions + 0.5 × named recommenders + target upside (capped). These are <b>attributed opinions from your articles</b>, not our valuation — the panel analysis decides.</p>
+    <div id="ideas-body"><div class="muted small">Click <b>Extract &amp; rank ideas</b> after the idea articles are captured.</div></div>
+  </div>
+  <div class="card"><h3>Recent batches</h3>${batches.length ? `<div class="tbl-wrap"><table><tbody>${batches.map((b) => `<tr><td><a href="#/batch/${esc(b.batch_id)}">${dt(b.created_at)}</a></td><td>${statusPill(b.status)}</td><td>${b.symbols.map((s) => `<span class="pill">${esc(s)}</span>`).join(' ')}</td><td class="small muted">${esc(b.params.horizon)} · ${b.params.loops} loop(s) · ${esc(b.params.mode)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No batches yet.</div>'}</div>`;
+  const save = async (recapture) => {
+    const lines = (id) => $(id).value.split(/\s+/).filter(Boolean);
+    try {
+      const r = await api('/api/et/lists', { method: 'POST', body: { news_articles: lines('#l-news'), idea_articles: lines('#l-ideas'), recapture } });
+      toast(`Saved · ${r.queued} queued for capture`);
+      if (r.rejected.length || r.queue_rejected.length) { $('#l-msg').innerHTML = [...r.rejected, ...r.queue_rejected].map((x) => `<span class="res fail">${esc(x.url.slice(0, 50))}: ${esc(x.reason)}</span>`).join('<br>'); return; }
+      viewET();
+    } catch (e) { toast(e.message); }
+  };
+  $('#l-save').onclick = () => save(false);
+  $('#l-recap').onclick = () => save(true);
+  $('#scan-go').onclick = async () => { const s = $('#scan-sym').value.trim(); if (!s) return; try { const r = await api('/api/et/scan', { method: 'POST', body: { symbol: s } }); toast(r.added.length ? 'Topic scan queued' : (r.rejected[0] || {}).reason || 'Not queued'); } catch (e) { toast(e.message); } };
+  $('#i-top').onclick = (e) => { const n = e.target.dataset.n; if (n) { ET.top = Number(n); store.set('ca-idea-top', ET.top); $$('#i-top button').forEach((b) => b.classList.toggle('on', b.dataset.n === n)); loadIdeas(false); } };
+  $('#i-extract').onclick = () => loadIdeas(true);
+  loadIdeas(false);
+}
+
+async function loadIdeas(extract) {
+  const body = $('#ideas-body'); if (!body) return;
+  if (extract) { body.innerHTML = '<div class="muted">Extracting ideas from captured idea articles…</div>'; $('#i-extract').disabled = true; }
+  try {
+    const r = extract ? await api(`/api/ideas/extract?top=${ET.top}`, { method: 'POST' }) : await api(`/api/ideas?top=${ET.top}`);
+    ET.ranking = r;
+    body.innerHTML = ideasHtml(r);
+    bindIdeas();
+  } catch (e) { body.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+  const b = $('#i-extract'); if (b) b.disabled = false;
+}
+
+function ideasHtml(r) {
+  const head = `<p class="small muted">${r.idea_articles_captured} of ${r.idea_articles_listed} idea article(s) captured · ${r.total_candidates} stock(s) found · prices: ${esc(r.price_source)}${r.method ? ` · extraction: ${esc(r.method)}` : ''}${r.processed !== undefined ? ` · ${r.processed} article(s) processed now` : ''}</p>
+    ${(r.errors || []).length ? `<div class="notice bad">${r.errors.map(esc).join('<br>')}</div>` : ''}`;
+  if (!r.top.length) return head + '<div class="empty">No ideas yet. Capture the idea articles, then click Extract & rank.</div>';
+  return head + `<div class="tbl-wrap"><table><thead><tr><th></th><th>#</th><th>Stock</th><th>Score</th><th>Signals</th><th>Evidence</th></tr></thead><tbody>
+    ${r.top.map((s, i) => `<tr><td><input type="checkbox" data-pick="${esc(s.symbol)}" ${ET.picked.has(s.symbol) ? 'checked' : ''}></td><td>${i + 1}</td>
+      <td><b>${esc(s.symbol)}</b><div class="small muted">${esc(s.name)}</div></td><td><b>${s.score}</b></td>
+      <td class="small">${esc(s.why)}</td>
+      <td><details><summary class="small">${s.mentions.length} mention(s)</summary>${s.mentions.map((m) => `<div class="passage small"><span class="pill ${['buy', 'accumulate'].includes(m.stance) ? 'good' : ['reduce', 'sell', 'avoid'].includes(m.stance) ? 'bad' : ''}">${esc(m.stance.replace('_', ' '))}</span>
+        ${m.target_price ? ` target ${fmt(m.target_price, 0)}` : ''}${m.horizon_text ? ` · ${esc(m.horizon_text)}` : ''}${m.recommended_by ? ` · by ${esc(m.recommended_by)}` : ''}<br>“${esc(m.quote)}” <span class="pid">${esc(m.passage_id)}</span><br>
+        <span class="muted">${esc(m.rationale)} — <a href="#/source/${esc(m._src)}">${esc((m.source_title || '').slice(0, 60))}</a> · ${esc(m._method)}</span></div>`).join('')}</details></td></tr>`).join('')}
+    </tbody></table></div>
+    ${r.unresolved_mentions.length ? `<details class="small"><summary>${r.unresolved_mentions.length} mention(s) not matched to an NSE symbol</summary><ul>${r.unresolved_mentions.map((u) => `<li>${esc(u.mention)} — ${esc(u.source)}</li>`).join('')}</ul></details>` : ''}
+    <div class="card tight" style="margin-top:12px"><h3>Analyse the stocks you pick</h3>
+      <div class="row"><div><label class="small">Horizon</label><div class="seg" id="b-hz"><button data-v="short">Short</button><button data-v="medium" class="on">Medium</button><button data-v="long">Long</button></div></div>
+        <div><label class="small">Loops</label><div class="seg" id="b-lp">${Array.from({ length: (HEALTH && HEALTH.analysis.max_loops) || 3 }, (_, i) => `<button data-v="${i + 1}" class="${i === 0 ? 'on' : ''}">${i + 1}</button>`).join('')}</div></div>
+        <div><label class="small">Mode</label><div class="seg" id="b-md"><button data-v="live" class="${HEALTH && !HEALTH.panel_missing_keys.length ? 'on' : ''}">Live</button><button data-v="demo" class="${HEALTH && HEALTH.panel_missing_keys.length ? 'on' : ''}">Demo</button></div></div>
+        <span class="spacer"></span><button class="btn primary" id="b-go">Analyse selected (<span id="b-n">${ET.picked.size}</span>)</button></div>
+      <p class="small muted" id="b-est">Each stock gets the full panel (three brains, Head, Critic, rules). Live cost scales with stocks × loops; the budget is checked before starting. Demo mode uses the fictional company for every pick (UI preview only).</p></div>`;
+}
+
+function bindIdeas() {
+  const segv = (id) => { const b = $(`${id} button.on`); return b ? b.dataset.v : null; };
+  ['#b-hz', '#b-lp', '#b-md'].forEach((id) => { const el = $(id); if (el) el.onclick = (e) => { if (e.target.dataset.v) { $$(`${id} button`).forEach((b) => b.classList.toggle('on', b === e.target)); } }; });
+  $$('[data-pick]').forEach((c) => (c.onchange = () => { c.checked ? ET.picked.add(c.dataset.pick) : ET.picked.delete(c.dataset.pick); $('#b-n').textContent = ET.picked.size; }));
+  const go = $('#b-go'); if (!go) return;
+  go.onclick = async () => {
+    if (!ET.picked.size) { toast('Tick at least one stock'); return; }
+    if (ET.picked.size > 10) { toast('Pick at most 10'); return; }
+    go.disabled = true;
+    try {
+      const ideas = ET.ranking.top.filter((s) => ET.picked.has(s.symbol));
+      const r = await api('/api/batches', { method: 'POST', body: { symbols: [...ET.picked], horizon: segv('#b-hz') || 'medium', loops: Number(segv('#b-lp') || 1), mode: segv('#b-md') || 'live', ideas } });
+      location.hash = `#/batch/${r.batch_id}`;
+    } catch (e) { toast(e.message); go.disabled = false; }
+  };
+}
+
+async function viewBatch(id) {
+  let timer = null;
+  CLEANUP = () => clearTimeout(timer);
+  const draw = async () => {
+    const b = await api(`/api/batches/${id}`);
+    const done = b.items.filter((i) => i.verdict).length;
+    $('#app').innerHTML = `<div class="card"><a href="#/et">← ET Prime &amp; ideas</a><div class="row" style="margin-top:6px"><h2 style="margin:0">Batch analysis</h2>${statusPill(b.status)}
+      <span class="pill">${esc(b.params.horizon)}</span><span class="pill">${b.params.loops} loop(s)</span>${b.params.mode === 'demo' ? '<span class="pill bad">DEMO</span>' : '<span class="pill">live</span>'}<span class="spacer"></span><span class="small muted">${done}/${b.items.length} complete</span></div>
+      <div class="phase ${b.status === 'completed' ? 'done' : 'active'}" style="margin-top:10px"><div class="bar"><i style="width:${(done / b.items.length) * 100}%"></i></div></div>
+      <p class="small muted">Sorted by outcome: actionable buys first, then wait, hold, insufficient data, avoid. Each row links to its full report (progress tracker, analyst reports, Head ↔ Critic, rules, sources).${b.report_path ? ` Combined report: <code>${esc(b.report_path)}</code>` : ''}</p>
+      <div class="tbl-wrap"><table><thead><tr><th>Stock</th><th>Status</th><th>Permitted action</th><th>Head proposal</th><th>Governance</th><th>What blocks it</th><th>Summary</th><th></th></tr></thead><tbody>
+      ${b.items.map((it) => { const v = it.verdict; const p = it.progress;
+        return `<tr><td><b>${esc(it.symbol)}</b></td>
+        <td>${v ? statusPill(it.run ? it.run.status : it.status) : it.status === 'running' ? `<span class="pill info">running${p ? ` · loop ${p.loop} · ${esc(p.current || '')}` : ''}</span>` : statusPill(it.status)}</td>
+        <td>${v ? decisionPill(v.decision, v.actionable) : '—'}</td><td>${v ? decisionPill(v.head_decision) : '—'}</td><td>${v && v.governance != null ? v.governance : '—'}</td>
+        <td class="small">${v ? esc(v.blockers.join(', ') || 'none') : ''}</td><td class="small">${v ? esc(v.summary) : esc((it.run && it.run.summary) || '')}</td>
+        <td><a class="btn sm" href="#/run/${esc(it.run_id)}">Report</a></td></tr>`; }).join('')}</tbody></table></div></div>
+      ${(b.params.ideas || []).length ? `<div class="card"><h3>Idea signals that led here</h3><ul class="small">${b.params.ideas.map((i) => `<li><b>${esc(i.symbol)}</b> (score ${esc(i.score)}) — ${esc(i.why)}</li>`).join('')}</ul><p class="small muted">Attributed opinions from your ET articles. The panel and rules above are what decide.</p></div>` : ''}`;
+    if (b.status !== 'completed') timer = setTimeout(draw, 3000);
+  };
+  await draw();
+}
+
 /* ------------------------------------------------------------ portfolio */
 async function viewPortfolio() {
   const r = await api('/api/portfolio/holdings');
-  const s = r.status;
-  $('#app').innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">Portfolio (Kite, read-only)</h2><span class="spacer"></span>
-    <span class="pill ${s.state === 'connected' ? 'good' : s.state === 'login_required' ? 'warn' : ''}">${esc(s.state.replace('_', ' '))}</span>
-    ${s.state !== 'not_configured' ? '<a class="btn sm primary" href="/kite/login">Log in to Kite</a>' : ''}</div>
-    <p class="muted">${esc(s.message)} The adapter only exposes read operations (holdings, positions, quotes, candles). No order tools exist in this platform.</p>
-    ${s.state === 'not_configured' ? `<div class="notice info">To connect: create an app at developers.kite.trade with redirect URL <code>http://127.0.0.1:${location.port || 8765}/kite/callback</code>, then run <code>ca secrets set KITE_API_KEY</code> and <code>ca secrets set KITE_API_SECRET</code>. Without Kite, prices come from NSE bhavcopy.</div>` : ''}
+  const s = r.status.connect, m = r.status.mcp;
+  const pill = (st) => `<span class="pill ${st.state === 'connected' ? 'good' : ['login_required', 'error'].includes(st.state) ? 'warn' : ''}">${esc(st.state.replace('_', ' '))}</span>`;
+  $('#app').innerHTML = `<div class="grid g2">
+    <div class="card"><div class="row"><h2 style="margin:0">Kite MCP</h2><span class="pill info">recommended · free</span><span class="spacer"></span>${pill(m)}</div>
+      <p class="small">Uses Zerodha's hosted Kite MCP server (the same one Claude Desktop/Code connect to). You log in on Zerodha's own page (OAuth); the token stays on this laptop. Gives holdings, quotes and daily candles — no paid Kite Connect app needed.</p>
+      <p class="small muted">${esc(m.message)}</p>
+      <div class="row">${m.state === 'connected' ? '<button class="btn sm" id="mcp-off">Disconnect</button>' : '<a class="btn primary sm" href="/kite-mcp/login">Connect Kite (MCP)</a>'}</div>
+      <p class="small muted">Read-only by construction: only read tools (holdings, positions, margins, quotes, LTP, OHLC, historical data, instrument search) can be called; order/GTT tools are refused in code.</p></div>
+    <div class="card"><div class="row"><h2 style="margin:0">Kite Connect</h2><span class="pill">optional · paid data</span><span class="spacer"></span>${pill(s)}</div>
+      <p class="small muted">${esc(s.message)}</p>
+      ${s.state !== 'not_configured' ? '<a class="btn sm" href="/kite/login">Log in to Kite Connect</a>' : `<p class="small">Only needed if you prefer your own Kite Connect app: create one at developers.kite.trade with redirect <code>http://127.0.0.1:${location.port || 8765}/kite/callback</code>, then <code>ca secrets set KITE_API_KEY</code> / <code>KITE_API_SECRET</code>.</p>`}
+      <p class="small muted">Price source order in analyses: Kite Connect → Kite MCP → NSE bhavcopy.</p></div></div>
+  <div class="card"><div class="row"><h2 style="margin:0">Holdings</h2><span class="spacer"></span>${r.via ? `<span class="pill">via ${esc(r.via)}</span>` : ''}</div>
+    ${!r.holdings.length ? '<div class="empty">Connect Kite (MCP) to see your holdings here.</div>' : ''}
     ${r.holdings.length ? `<div class="tbl-wrap"><table><thead><tr><th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>P&L</th><th>Day</th><th></th></tr></thead><tbody>
       ${r.holdings.map((h) => `<tr><td><b>${esc(h.symbol)}</b></td><td>${h.quantity}</td><td>${fmt(h.average_price)}</td><td>${fmt(h.last_price)}</td><td class="res ${h.pnl >= 0 ? 'pass' : 'fail'}">${fmt(h.pnl, 0)}</td><td>${fmt(h.day_change_pct)}%</td>
       <td><button class="btn sm" data-sym="${esc(h.symbol)}">Review holding</button></td></tr>`).join('')}</tbody></table></div>
       <p class="small muted">Average price is not a tax-lot history; lot-level tax needs your broker's transaction export.</p>` : ''}</div>`;
   $$('[data-sym]').forEach((b) => (b.onclick = async () => { const r2 = await api('/api/runs', { method: 'POST', body: { symbol: b.dataset.sym, horizon: 'medium', action: 'continue_holding', mode: 'live' } }).catch((e) => toast(e.message)); if (r2) location.hash = `#/run/${r2.run_id}`; }));
+  const off = $('#mcp-off'); if (off) off.onclick = async () => { await api('/api/kite-mcp/disconnect', { method: 'POST' }); toast('Kite MCP disconnected'); viewPortfolio(); };
 }
 
 /* --------------------------------------------------------------- system */
@@ -690,7 +836,7 @@ async function viewSystem() {
     ${item(h.anthropic.configured, 'Anthropic API key', h.anthropic.configured ? 'Configured (OS keychain or .env; never sent to the browser)' : 'Missing', 'Run <code>ca secrets set ANTHROPIC_API_KEY</code>, then restart <code>ca serve</code>.')}
     ${item(h.openai.configured ? true : null, 'OpenAI API key', h.openai.configured ? 'Configured' : 'Not configured — only needed if a role uses OpenAI', 'Run <code>ca secrets set OPENAI_API_KEY</code>, then restart <code>ca serve</code>.')}
     ${item(!h.panel_missing_keys.length, 'Keys for the configured panel', h.panel_missing_keys.length ? 'Missing: ' + h.panel_missing_keys.map(esc).join(', ') : 'All panel roles can run', '')}
-    ${item(h.kite.state === 'connected' ? true : h.kite.state === 'not_configured' ? null : false, 'Zerodha Kite (read-only)', esc(h.kite.message), '<a href="#/portfolio">Connect on the Portfolio page</a>')}
+    ${item(h.kite_mcp.connected || h.kite.state === 'connected' ? true : null, 'Zerodha Kite (read-only)', h.kite_mcp.connected ? 'Kite MCP connected (holdings, quotes, candles)' : h.kite.state === 'connected' ? 'Kite Connect connected' : 'Not connected — prices fall back to NSE bhavcopy', '<a href="#/portfolio">Connect Kite (MCP) on the Portfolio page</a> — free, OAuth login on Zerodha\'s page.')}
     ${item(h.bhavcopy.trading_days >= 200 ? true : null, 'NSE bhavcopy store', `${h.bhavcopy.trading_days} trading days · last ${h.bhavcopy.last || '—'}`, 'Run <code>ca ingest-bhav --days 260</code> (fallback when Kite is not connected).')}
     ${item(h.policies_confirmed, 'Personal policies confirmed', 'Horizons, risk base and limits reviewed in config/user.yaml', 'Review the config files and set <code>policies_confirmed: true</code>. Until then everything is research-only.')}
     ${item(h.capital_configured ? true : null, 'Capital configured', 'Needed for position sizing and tranches', 'Set <code>total_investment_capital_inr</code> in config/user.yaml.')}
