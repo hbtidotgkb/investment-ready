@@ -41,7 +41,7 @@ async function checkConn() {
   const c = $('#conn');
   try {
     const j = await (await fetch(svc('/v1/health'))).json();
-    c.textContent = settings.tok ? `connected · v${j.version}` : 'connected · not paired';
+    c.textContent = settings.tok ? `connected · ext v${VERSION} · platform v${j.version}` : 'connected · not paired';
     c.className = 'pill ' + (settings.tok ? 'good' : 'warn');
   } catch (e) { c.textContent = 'service offline — run ca serve'; c.className = 'pill bad'; }
 }

@@ -48,18 +48,54 @@ function personalCaExtract(mode, maxChars) {
       if (!t || t.length < 2 || seen.has(t)) return;
       seen.add(t); out.passages.push(t);
     });
-    if (out.passages.length < 3) {
-      clean(root.innerText).split(/\n{1,}/).filter((t) => t.length > 30).forEach((t) => { if (!seen.has(t)) out.passages.push(t); });
-      out.access_warnings.push('paragraph_structure_not_found — text split by lines');
-    }
-    // Data tables (e.g. "stocks with upside" lists) are sometimes rendered outside the text block.
-    document.querySelectorAll('table').forEach((tb) => {
-      if (root.contains(tb) || !visible(tb) || tb.closest('nav, footer, aside, header')) return;
-      const rows = [...tb.querySelectorAll('tr')].map((tr) => [...tr.querySelectorAll('th,td')].map((c) => clean(c.innerText)).join(' | ')).filter((r) => r.replace(/[|\s]/g, ''));
-      if (rows.length < 2) return;
+    // Tables first: real <table>s and widget grids (role=table/grid, or class names containing "table"),
+    // anywhere in the content column. Rows keep their cells together ("Brigade | 6 | Strong Buy | 43%").
+    const tableTexts = [];
+    const structure = [];
+    const tableLike = [...document.querySelectorAll('table, [role="table"], [role="grid"], [class*="table" i], [class*="Table"]')]
+      .filter((el) => visible(el) && !el.closest('nav, footer, aside, header'))
+      .filter((el, _, all) => !all.some((o) => o !== el && o.contains(el) && o.matches('table, [role="table"], [role="grid"]')));
+    tableLike.forEach((el) => {
+      let rows = [...el.querySelectorAll('tr, [role="row"]')]
+        .map((r) => [...r.querySelectorAll('th, td, [role="cell"], [role="gridcell"], [role="columnheader"], [role="rowheader"]')]
+          .map((c) => clean(c.innerText)).filter(Boolean).join(' | '))
+        .filter((r) => r.replace(/[|\s]/g, ''));
+      if (rows.length < 2) {
+        // div grid without roles: descend through single-child wrappers, then children = rows,
+        // grandchildren = cells (cells are often inline spans whose innerText has no separators)
+        let box = el;
+        for (let d = 0; d < 6; d++) {
+          const vis = [...box.children].filter(visible);
+          if (vis.length !== 1) break;
+          box = vis[0];
+        }
+        const kids = [...box.children].filter(visible);
+        const withCells = kids.filter((k) => k.children.length >= 2);
+        if (kids.length >= 3 && withCells.length >= kids.length * 0.8) {
+          rows = withCells.map((k) => [...k.children].map((c) => clean(c.innerText)).filter(Boolean).join(' | ')).filter(Boolean);
+        }
+      }
+      if (rows.length < 2 || rows.join('').length < 40) return;
       const t = '[table]\n' + rows.join('\n');
-      if (!seen.has(t)) { seen.add(t); out.passages.push(t); }
+      if (seen.has(t) || tableTexts.some((x) => x.includes(t.slice(8, 200)))) return;
+      seen.add(t); tableTexts.push(t);
+      structure.push(`${el.tagName.toLowerCase()}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/)[0] : ''}:${rows.length}rows`);
     });
+    if (out.passages.length < 3) {
+      // Bare-text bodies (<br>-separated): keep long lines as paragraphs and GROUP short lines
+      // (table cells, figures, labels) instead of dropping them.
+      let buf = [];
+      const flush = () => { if (buf.length) { const t = buf.join(' | '); if (!seen.has(t)) { seen.add(t); out.passages.push(t); } buf = []; } };
+      clean(root.innerText).split(/\n+/).map((t) => t.trim()).filter(Boolean).forEach((t) => {
+        if (t.length > 80) { flush(); if (!seen.has(t)) { seen.add(t); out.passages.push(t); } return; }
+        buf.push(t);
+        if (buf.join(' | ').length > 400) flush();
+      });
+      flush();
+      out.access_warnings.push('paragraph_structure_not_found — text split by lines (short lines grouped)');
+    }
+    tableTexts.forEach((t) => out.passages.push(t));
+    out.access_warnings.push(structure.length ? `tables_found: ${structure.slice(0, 5).join(', ')}` : 'tables_found: none');
     const pay = [...document.querySelectorAll('[class*="paywall"], [class*="subscribe"], [class*="prime_lock"], [class*="locked"]')].filter(visible);
     if (pay.length) out.access_warnings.push('possible_paywall_or_preview — verify the end of the article is present');
     out.related_links = [...root.querySelectorAll('a[href]')].map((a) => a.href).filter((h) => h.startsWith(location.origin) && h !== location.href).slice(0, 30);

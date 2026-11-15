@@ -133,6 +133,19 @@ def test_extension_heartbeat_shows_connected():
     assert ext["connected"] and ext["version"] == "0.5.0" and ext["id"] == "abcdef"
 
 
+def test_company_matching_short_names_and_bylines():
+    nse.EQ_FILE.write_text(EQ + "DLF,DLF Limited,EQ,05-JUL-2007,2,1,INE271C01023,2\n"
+                                "VIPULLTD,Vipul Limited,EQ,23-APR-2015,1,1,INE946H01037,1\n", encoding="utf-8")
+    r = nse.resolve_companies("DLF Ltd | 7 | Buy | 22 | 9%. HDFC Bank rises.")
+    assert {c["symbol"] for c in r["resolved"]} == {"DLF", "HDFCBANK"}
+    assert not nse.resolve_companies("The dlf brand alone is not enough")["resolved"]   # needs a Ltd/Limited suffix
+    rec = ingest_batch(_capture(None, "https://economictimes.indiatimes.com/z/articleshow/77.cms",
+                                ["Godrej and DLF Ltd lead the realty pack.", "Disclaimer: This article has been written by Vipul Kumar."],
+                                "byline"))
+    syms = {c["symbol"] for c in rec["items"][0]["companies"]["resolved"]}
+    assert "DLF" in syms and "VIPULLTD" not in syms
+
+
 def test_topic_url_from_equity_master():
     assert ideas.topic_url("TCS") == "https://economictimes.indiatimes.com/topic/tata-consultancy-services"
     assert ideas.topic_url("NOPE") is None

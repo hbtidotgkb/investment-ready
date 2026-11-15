@@ -4,6 +4,7 @@ and extract attributed claims with verification tasks."""
 from __future__ import annotations
 
 import json
+import re
 import uuid
 
 from .contracts import CaptureBatch, ClaimsLLM
@@ -13,6 +14,8 @@ from .ledger import get_ledger
 from .settings import canonical_hash, iso, sha256_text
 
 MAX_SOURCE_CHARS = 80_000
+# Disclaimers/bylines name people ("written by Vipul Kumar") — not company mentions.
+BYLINE = re.compile(r"disclaimer|written by|views and recommendations|^\s*\(?you can now subscribe", re.I)
 
 
 def _fingerprint(passages: list[dict]) -> str:
@@ -63,7 +66,8 @@ def ingest_batch(batch: CaptureBatch) -> dict:
             continue
         version = (existing[-1]["version"] + 1) if existing else 1
         first_seen = led.fetchone("SELECT MIN(first_seen_at) AS f FROM research_sources WHERE source_id=?", [sid])
-        companies = nse.resolve_companies(it.title + " " + " ".join(p["text"] for p in passages[:40]), master)
+        companies = nse.resolve_companies(it.title + " " + " ".join(p["text"] for p in passages[:60]
+                                                                    if not BYLINE.search(p["text"][:200])), master)
         if q and q["symbol"]:
             companies = _with_link(companies, q["symbol"], master, "queue")
         warnings = list(it.access_warnings) + (["truncated_by_extension"] if it.truncated else [])

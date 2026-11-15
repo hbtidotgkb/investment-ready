@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Personal CA — Research Capture",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Capture articles you can already read (e.g. ET Prime) — single pages or a queued list — into your local Personal CA research inbox, with passages and provenance.",
   "permissions": ["sidePanel", "scripting", "activeTab", "storage", "alarms"],
   "optional_host_permissions": ["https://economictimes.indiatimes.com/*"],

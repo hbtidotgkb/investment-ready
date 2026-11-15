@@ -61,6 +61,9 @@ def resolve_companies(text: str, master: list[dict] | None = None, limit: int = 
     for r in master:
         core = re.sub(r"\s+", " ", _SUFFIX.sub(" ", r["name"].lower())).strip(" .,")
         if len(core) < 5:
+            # short names (e.g. "DLF") only when written with a company suffix: "DLF Ltd", "DLF Limited"
+            if len(core) >= 2 and re.search(rf"\b{re.escape(core)}\s+(ltd\.?|limited)\b", low):
+                hits.setdefault(core, []).append(r)
             continue
         if f" {core} " in low or f" {core}'" in low or f" {core}," in low:
             hits.setdefault(core, []).append(r)

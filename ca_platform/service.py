@@ -600,11 +600,13 @@ EXT_FILE = SECRETS_DIR.parent / "settings" / "extension.json"
 
 def _ext_heartbeat(request: Request) -> None:
     """The extension polls the queue every minute; remember that it is installed and paired."""
+    # Chrome omits the Origin header on extension GETs to hosts it has permission for, so the
+    # (token-authenticated) extension identifies itself with its own headers instead.
     origin = request.headers.get("origin", "")
-    if not origin.startswith("chrome-extension://"):
+    ext_id = request.headers.get("x-ca-ext-id") or (origin.split("//", 1)[1] if origin.startswith("chrome-extension://") else None)
+    if not ext_id:
         return
-    info = {"last_seen": time.time(), "version": request.headers.get("x-ca-ext-version"),
-            "id": request.headers.get("x-ca-ext-id") or origin.split("//", 1)[1]}
+    info = {"last_seen": time.time(), "version": request.headers.get("x-ca-ext-version"), "id": ext_id}
     EXT_FILE.write_text(json.dumps(info), encoding="utf-8")
 
 
