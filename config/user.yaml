@@ -1,0 +1,19 @@
+# Personal configuration. Spec §15 step 7: configure explicit horizons, risk base,
+# planned-loss limits and cash policy BEFORE any actionable allocation.
+# Until `policies_confirmed: true`, every output is research-only (no actionable buy).
+version: user@1
+policies_confirmed: false
+
+capital:
+  total_investment_capital_inr: null     # e.g. 1000000 — required for position sizing
+  available_cash_inr: null
+  core_pct: 50                           # strategic core (index ETF) vs satellite (stocks)
+  portfolio_planned_loss_budget_pct: null  # spec: must be set before production allocation; no default invented
+
+budget:
+  monthly_llm_budget_usd: 25.0           # hard cap enforced in code (spec N6)
+  per_run_reservation_usd: 1.50          # reserved before a panel starts; reconciled after
+
+service:
+  host: 127.0.0.1                        # loopback only (spec N14)
+  port: 8765

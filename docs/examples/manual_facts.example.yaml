@@ -1,0 +1,46 @@
+# Copy to data/manual/<SYMBOL>.yaml (data/ is git-ignored) and fill from the OFFICIAL filing.
+# Placeholder values below are illustrative only — they are NOT real figures for any company.
+#
+# Every fact becomes a typed FinancialFact with a cited passage. Set `verified: true` only
+# after you have checked the number against the T1 source yourself. Sources published after
+# the decision time are excluded automatically (point-in-time rule).
+
+company_name: "Example Company Limited"
+sector: "Information Technology"
+
+sources:
+  - id: q2_results
+    title: "Q2 FY27 financial results (consolidated) — exchange filing"
+    publisher: "NSE"
+    tier: T1_official                 # T1_official | T2_reputable_press | T5_aggregator ...
+    url: "https://www.nseindia.com/companies-listing/corporate-filings-financial-results"
+    published_at: "2026-10-09T18:30:00+05:30"
+  - id: annual_report
+    title: "Annual Report FY26 — auditor's report and notes"
+    publisher: "Company / BSE"
+    tier: T1_official
+    url: "https://www.bseindia.com/"
+    published_at: "2026-06-20T10:00:00+05:30"
+  - id: shp
+    title: "Shareholding pattern Sep-2026"
+    publisher: "NSE"
+    tier: T1_official
+    url: "https://www.nseindia.com/companies-listing/corporate-filings-shareholding-pattern"
+    published_at: "2026-10-18T10:00:00+05:30"
+
+facts:
+  # metric names understood by the platform: revenue, net_profit_attributable, net_profit_underlying,
+  # operating_cash_flow, eps, pe_ttm, pb, roe_pct, debt_to_equity, promoter_holding_pct,
+  # promoter_pledge_pct, fii_holding_pct, dii_holding_pct, mf_holding_pct, other_income,
+  # receivable_days, contingent_liabilities
+  - {metric: revenue, value: 10000.0, unit: crore, period: quarter, period_end: 2026-09-30, scope: consolidated, source: q2_results, verified: false}
+  - {metric: net_profit_attributable, value: 1500.0, unit: crore, period: quarter, period_end: 2026-09-30, scope: consolidated, source: q2_results, verified: false}
+  - {metric: promoter_pledge_pct, value: 0.0, unit: "%", period: quarter, period_end: 2026-09-30, source: shp, verified: false}
+
+notes:
+  # Free-text findings copied from the source. These become quotable passages for the Forensic CA.
+  - {source: annual_report, text: "The statutory auditor issued an unmodified opinion for FY26."}
+  - {source: q2_results, text: "Exceptional items: none reported in the quarter."}
+
+# Optional override if NSE lists are unreachable (keep the source!)
+# surveillance: {status: not_listed, source: "NSE ASM/GSM lists checked 15-Nov-2026"}

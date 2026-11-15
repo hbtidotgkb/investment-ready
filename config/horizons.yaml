@@ -1,0 +1,10 @@
+# Explicit horizon conventions (spec F1, open question §19). Review and confirm.
+version: horizons@1
+horizons:
+  short:  {label: "Short (≈3 months)",  trading_days: 63,  calendar_months: 3,  entry_window_trading_days: 5}
+  medium: {label: "Medium (≈6 months)", trading_days: 126, calendar_months: 6,  entry_window_trading_days: 10}
+  long:   {label: "Long (≈12+ months)", trading_days: 252, calendar_months: 13, entry_window_trading_days: 20}
+evaluation:
+  fill_policy: "next trading-day open within entry zone, else no fill"
+  ambiguous_bar: "conservative — stop assumed hit first when stop and target trade in the same bar"
+  benchmark: "Nifty 50 ETF total return, same window"

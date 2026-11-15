@@ -1,0 +1,21 @@
+# Listed equity capital-gains policy (resident individual, STT paid). Spec §9 "Tax".
+# A file modification date never proves current law. The engine REFUSES after-tax figures
+# until you verify these against official sources and set review_status: verified.
+version: tax@2024-07-23
+review_status: needs_user_verification   # -> verified (after you check)
+last_verified_on: null
+applicability: "Listed equity shares / equity-oriented funds, STT paid, resident individual"
+effective_from: "2024-07-23"
+sources:
+  - "Finance (No. 2) Act, 2024 — Sections 111A and 112A (https://incometaxindia.gov.in)"
+  - "Union Budget 2024-25 speech, Part B (https://www.indiabudget.gov.in)"
+note: >
+  Values below reflect the July 2024 changes as known at build time. Budgets after that date
+  may have changed them — verify before setting review_status to verified. Not a tax-filing tool.
+stcg:
+  rate_pct: 20.0
+  holding_period_months_lte: 12   # held for 12 months or less => short term
+ltcg:
+  rate_pct: 12.5
+  annual_exemption_inr: 125000    # taxpayer-level, cannot be reused per pick
+cess_pct: 4.0

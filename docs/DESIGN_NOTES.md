@@ -1,0 +1,49 @@
+# Design notes: implementation status and open concerns
+
+Build 0.2.0 · 15 November 2026. This file records how this build maps to
+`Personal_CA_Platform_Final_Design_v2.md`, where it deliberately differs, and what needs a decision.
+
+## Status against the roadmap
+
+| Area | Status |
+|---|---|
+| Contracts (bundle, brain report, critique, decision record, capture envelope) | Built (Pydantic v2, `schema_version` on records) |
+| Point-in-time bundle, canonical hash, timestamps (`published_at` / `first_seen_at` / `ingested_at`) | Built. Unknown publication time stays null; search "page age" is a hint only |
+| Prices: Kite → bhavcopy fallback; corporate-action flag from NSE `PREV_CLOSE` | Built. Corporate-action *adjustment* is not built; a flag blocks dependent action instead |
+| Technicals, chart patterns (double bottom/top, H&S, inverse H&S) | Built, re-implemented (the original skill scripts were not in this repo) |
+| Surveillance (NSE ASM long/short + GSM lists) | Built. The NSE quote endpoint returns Access Denied, so it is not used (no workarounds) |
+| NSE announcements, tiered news RSS, Claude web-search discovery (allow-listed) | Built |
+| Financial facts | **Manual facts file only** (`data/manual/<SYMBOL>.yaml`). NSE/BSE XBRL ingestion is the next priority |
+| Three brains in parallel, role views, anonymisation, Head draft → Critic → Head response | Built |
+| Verified-quote citations, bounded repair (≤2), code-side objection resolution | Built |
+| Rules: preflight + final enforcement, governance rubric, sizing, tranches, tax, consistency | Built (single-stock scope) |
+| Ledger, evaluation contract at issuance, request records, cache by complete-request hash | Built |
+| Research inbox: receipts, idempotency, versions, company resolution, claims, research Q&A | Built |
+| Chrome extension 0.2.0 (side panel, ET-only optional permission, selection capture, send/export) | Built new (the 0.1.1 ZIP was not in this repo) |
+| Local service: loopback, host check, pairing token, origin scoping, size limits | Built |
+| Kite read-only adapter + login; Kite MCP for chat with order tools denied | Built |
+| Modes `recommend`, `hot`, `replan`, `watch`, `eval`, `backtest` | **Not yet.** Only `analyse` is built |
+| Evidence-repair pass (fetch new evidence after the critique, re-version the bundle) | **Not yet.** An open blocker that needs new evidence stays blocked (safe default) |
+| Outcome labelling, scorecards, golden-case evals (L2–L4), improvement loop | **Not yet** |
+| Lot-level tax, portfolio-wide planned-loss budget, stress view | **Not yet.** The budget is deliberately not invented (spec §9.6) |
+
+## Deliberate refinements (please confirm)
+
+1. **Rejecting an objection requires a verified quote.** If the Head rejects a Critic objection, code downgrades it to `unresolved` unless the rejection cites a passage whose quote is found verbatim. The spec says "a rhetorical reply is not a passed test"; this is the strict, code-checkable version.
+2. **Only `blocker` objections block a buy.** Unresolved `major` objections are recorded and shown but do not block. If you want majors to block too, it is a one-line change in `panel.resolve` / `rules.engine.enforce`.
+3. **Governance score is computed in code** (rubric `governance@1`) from the Forensic CA's check classifications. The model's own number is ignored. The score is withheld below 60% checklist coverage, so missing evidence never looks clean.
+4. **Head score is not used for sizing.** Sizing is purely risk-based: the 2% planned loss at stop, with a 3% minimum stop-distance denominator, the 30% per-stock satellite cap and the 8% floor. The spec calls the score/risk weighting a baseline candidate; it needs a multi-stock `recommend` mode to matter.
+5. **The benchmark gate needs a verified tax file.** After-tax figures are refused until `config/tax_rates.yaml` is marked verified, so every live buy is blocked until you check it. Pre-tax numbers are still shown.
+6. **`policies_confirmed: false` blocks every actionable buy** until you review horizons, risk base and limits (spec §15 step 7).
+7. **Server-side refusal fallback is enabled** on model calls (`fallbacks: "default"`). If a fallback model answers, the substitution is recorded in the decision record and shown in the Audit tab. The spec requires fallbacks to be pre-evaluated, so you may prefer to turn this off until evals exist.
+
+## Concerns to discuss
+
+1. **Single vendor.** All roles run on Anthropic models (your choice for now). The spec's diversity argument, and especially Head–Critic vendor separation, is not met: the record says `vendor_separation: degraded`. Cheapest improvement: give the Critic a different vendor first. The gateway is the only file that would need a second provider adapter.
+2. **ET Prime rights.** The extension captures only what you can already read and records your personal-research attestation, but ET's terms on extraction, AI processing and retention remain unresolved (spec §7, §16). The attestation records your decision; it does not settle the legal question. Unattested captures are stored but never sent to a model.
+3. **Fundamentals are the weakest link.** Until XBRL ingestion exists, Forensic coverage depends on the manual facts file, and results found by web search are attributed claims, not verified facts. Expect `insufficient_data` / research-only outcomes for most live runs at first. That is the design working, not a bug.
+4. **Tax values are as of the July 2024 changes** (STCG 20%, LTCG 12.5% above ₹1.25 lakh, plus cess). Budgets since then may have changed them. Verify before marking the file verified.
+5. **Cost.** A live run makes about 8 Claude Opus 5.5 calls plus up to 9 web searches. All roles default to `claude-opus-5-5`; you can move the brains to `claude-sonnet-5-5` in `config/models.yaml` to cut cost. The monthly cap (`config/user.yaml`) is enforced before each run.
+6. **Kite Connect historical data is paid** (₹500/month per app, per the spec's check; verify current terms). Without it, prices come from NSE bhavcopy: end-of-day, unadjusted, with a ~5 minute one-time backfill.
+7. **NSE endpoints change.** Announcements and the ASM/GSM lists work today. If NSE starts refusing them, the run says so and surveillance becomes `unknown`, which blocks buys. A source can also be recorded manually in the facts file.
+8. **The original skill's scripts and the 0.1.1 extension were not in this repo.** If you have them, we should reconcile the re-implemented features, patterns and allocation against them and port their tests.

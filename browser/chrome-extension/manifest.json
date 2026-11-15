@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Personal CA — Research Capture",
+  "version": "0.2.0",
+  "description": "Capture articles you can already read (e.g. ET Prime) into your local Personal CA research inbox, with passages and provenance.",
+  "permissions": ["sidePanel", "scripting", "activeTab", "storage"],
+  "optional_host_permissions": ["https://economictimes.indiatimes.com/*"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Personal CA — open capture panel" },
+  "minimum_chrome_version": "116"
+}

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "deny": [
+      "mcp__kite__place_order",
+      "mcp__kite__modify_order",
+      "mcp__kite__cancel_order",
+      "mcp__kite__place_gtt_order",
+      "mcp__kite__modify_gtt_order",
+      "mcp__kite__delete_gtt_order",
+      "mcp__kite__place_mf_order",
+      "mcp__kite__cancel_mf_order",
+      "mcp__kite__place_mf_sip",
+      "mcp__kite__modify_mf_sip",
+      "mcp__kite__cancel_mf_sip"
+    ]
+  }
+}

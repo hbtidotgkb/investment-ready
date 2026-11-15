@@ -1,0 +1,35 @@
+# Deterministic rules engine policy (spec §9). Initial personal policy choices pending
+# evaluation — NOT empirically proven investment truths. No prompt can override these.
+version: rules@2
+
+vetoes:
+  surveillance:        {enabled: true}                       # on NSE ASM/GSM list
+  pledge:              {max_pct_of_promoter: 10.0, rising_quarters: 2}
+  governance:          {min_score: 40}                        # versioned rubric governance@1
+  audit:               {lookback_months: 12}                  # qualified opinion / auditor resignation
+  liquidity:           {min_adv20_crore: 5.0, microcap_min_adv20_crore: 10.0}
+  reward_risk:         {min_short_term: 2.0}
+  benchmark:           {enabled: true}                        # after-tax scenario must beat Nifty 50 ETF assumption
+  data_quality:        {numeric_discrepancy_pct: 5.0}
+  stale_data:          {max_price_age_trading_days: 1, quarterly_freshness_days: 100}
+  bearish_pattern:     {short_term_only: true}
+  required_evidence:   {roles: [quant, news, forensic, critic]}
+
+allocation:
+  core_pct_default: 50
+  satellite_max_per_stock_pct: 30
+  satellite_max_per_sector_pct: 40
+  satellite_floor_pct: 8
+  planned_loss_at_stop_pct_of_capital: 2.0   # NOT a maximum possible loss (gaps/slippage can exceed it)
+  min_risk_distance_pct: 3.0                 # minimum stop-distance denominator; prevents oversized positions
+  tranches_three: [50, 30, 20]
+  tranches_two: [60, 40]
+
+benchmark:
+  instrument: "Nifty 50 ETF (configured)"
+  # Assumption for the benchmark gate — an explicit, editable assumption, not a forecast.
+  assumed_annual_return_pct: 11.0
+  assumption_note: "Long-run assumption for comparison only; edit in config/rules.yaml"
+
+execution:
+  cost_per_side_pct: 0.1    # original illustrative cost/slippage assumption, not a current tariff

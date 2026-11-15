@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="ca-token" content="__CA_TOKEN__">
+<title>Personal CA</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Ctext x='16' y='22' font-size='15' font-family='Arial' font-weight='700' text-anchor='middle' fill='white'%3ECA%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/"><span class="logo">CA</span><span><b>Personal CA</b><small>Multi-brain equity research</small></span></a>
+  <nav id="nav">
+    <a href="#/" data-route="home">Analyse</a>
+    <a href="#/runs" data-route="runs">Runs</a>
+    <a href="#/inbox" data-route="inbox">Research inbox</a>
+    <a href="#/portfolio" data-route="portfolio">Portfolio</a>
+    <a href="#/system" data-route="system">System</a>
+  </nav>
+  <div class="top-right">
+    <span id="budget-pill" class="pill" title="Monthly LLM budget (enforced in code)">—</span>
+    <button id="theme-btn" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+<main id="app"><div class="loading">Loading…</div></main>
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head"><b id="drawer-title">Source</b><button class="icon-btn" id="drawer-close" aria-label="Close">✕</button></div>
+  <div id="drawer-body" class="drawer-body"></div>
+</aside>
+<div id="toast" class="toast" hidden></div>
+<footer class="foot">Personal research only · <b>analysis, not investment advice</b> · v__CA_VERSION__ · local service on 127.0.0.1</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

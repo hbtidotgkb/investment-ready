@@ -1,0 +1,76 @@
+# Source-quality registry. Every evidence item is tagged with a tier so the UI and the
+# brains can weigh it. Repeated coverage is NOT repeated confirmation (spec §6, §7).
+version: sources@1
+
+tiers:
+  T1_official:          {label: "Official / exchange", weight: 1.0, description: "Exchange filings, regulator, company disclosures"}
+  T2_reputable_press:   {label: "Reputable financial press", weight: 0.8, description: "Established newsrooms with editorial standards"}
+  T3_other_press:       {label: "Other press", weight: 0.5, description: "Recognised outlets with weaker financial-desk standards"}
+  T4_capture_unverified: {label: "User capture (unverified)", weight: 0.6, description: "Browser capture / PDF; attributed, not verified"}
+  T5_aggregator:        {label: "Aggregator", weight: 0.4, description: "Data aggregators; corroboration only, may copy filings"}
+  SYS_computed:         {label: "Computed in code", weight: 1.0, description: "Deterministic calculation from stored inputs"}
+  DEMO_synthetic:       {label: "DEMO synthetic", weight: 0.0, description: "Fabricated for demonstration. Never actionable."}
+
+domains:
+  # T1 — official
+  nseindia.com: T1_official
+  nsearchives.nseindia.com: T1_official
+  bseindia.com: T1_official
+  sebi.gov.in: T1_official
+  rbi.org.in: T1_official
+  mca.gov.in: T1_official
+  pib.gov.in: T1_official
+  # T2 — reputable financial press
+  economictimes.indiatimes.com: T2_reputable_press
+  business-standard.com: T2_reputable_press
+  livemint.com: T2_reputable_press
+  thehindubusinessline.com: T2_reputable_press
+  reuters.com: T2_reputable_press
+  bloomberg.com: T2_reputable_press
+  financialexpress.com: T2_reputable_press
+  moneycontrol.com: T2_reputable_press
+  cnbctv18.com: T2_reputable_press
+  ft.com: T2_reputable_press
+  # T3 — other press
+  ndtvprofit.com: T3_other_press
+  zeebiz.com: T3_other_press
+  businesstoday.in: T3_other_press
+  thehindu.com: T3_other_press
+  timesofindia.indiatimes.com: T3_other_press
+  # T5 — aggregators
+  screener.in: T5_aggregator
+  trendlyne.com: T5_aggregator
+  tickertape.in: T5_aggregator
+
+# Domains the News discovery search is allowed to use (Claude web_search allowed_domains).
+news_search_domains:
+  - nseindia.com
+  - bseindia.com
+  - economictimes.indiatimes.com
+  - business-standard.com
+  - livemint.com
+  - thehindubusinessline.com
+  - reuters.com
+  - moneycontrol.com
+  - financialexpress.com
+  - cnbctv18.com
+
+# Domains for results/filings discovery (official first, then reputable press reporting on filings)
+filings_search_domains:
+  - nseindia.com
+  - bseindia.com
+  - business-standard.com
+  - economictimes.indiatimes.com
+  - livemint.com
+  - moneycontrol.com
+
+# Publisher RSS feeds scanned for company mentions (titles + links only; no full-text scraping)
+rss_feeds:
+  - {name: "ET Markets — Stocks", url: "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms", domain: economictimes.indiatimes.com}
+  - {name: "Business Standard — Markets", url: "https://www.business-standard.com/rss/markets-106.rss", domain: business-standard.com}
+  - {name: "Mint — Markets", url: "https://www.livemint.com/rss/markets", domain: livemint.com}
+  - {name: "Moneycontrol — Business", url: "https://www.moneycontrol.com/rss/business.xml", domain: moneycontrol.com}
+  - {name: "BusinessLine — Markets", url: "https://www.thehindubusinessline.com/markets/feeder/default.rss", domain: thehindubusinessline.com}
+
+# Google News RSS search, filtered to registry domains above (headline + publisher + date only)
+google_news_rss: true

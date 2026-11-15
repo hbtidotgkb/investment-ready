@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal CA — Capture</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">CA</span><div><b>Personal CA</b><small>Research capture</small></div></div>
+  <span id="conn" class="pill">checking…</span>
+</header>
+
+<section class="actions">
+  <button id="allow-et" class="btn primary" title="Grant access to economictimes.indiatimes.com only, then capture">Allow ET &amp; capture</button>
+  <button id="cap-page" class="btn">Capture page</button>
+  <button id="cap-sel" class="btn">Capture selection</button>
+</section>
+<p class="hint">Captures only the text already rendered in this tab that you can read. No cookies, no paywall bypass. Check the end of each article and any tables against the page.</p>
+<div id="msg" class="msg" hidden></div>
+
+<section>
+  <div class="row"><h3>Session sources <span id="count" class="muted">0/10</span></h3><span class="spacer"></span><button id="clear" class="btn sm">Clear</button></div>
+  <input id="search" type="search" placeholder="Search captured passages…">
+  <div id="list"></div>
+</section>
+
+<section class="send">
+  <label class="attest"><input type="checkbox" id="attest"> I am using the selected captures for my own personal research, and I have legitimate access to them.</label>
+  <div class="row"><button id="send" class="btn primary">Send selected to Personal CA</button><button id="export" class="btn">Export JSON</button></div>
+  <div id="receipt"></div>
+</section>
+
+<details class="settings"><summary>Settings</summary>
+  <label>Service URL <input id="svc" type="text" value="http://127.0.0.1:8765"></label>
+  <label>Pairing token <input id="tok" type="password" placeholder="Paste from Personal CA → System"></label>
+  <button id="save" class="btn sm">Save &amp; test</button>
+  <p class="hint">The token is stored in this browser's extension storage only. Rotate it in Personal CA if it leaks.</p>
+</details>
+<script src="extractor.js"></script>
+<script src="sidepanel.js"></script>
+</body>
+</html>
