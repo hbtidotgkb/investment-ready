@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -113,6 +114,7 @@ def health():
         "panel_missing_keys": missing_keys(PANEL_ROLES),
         "kite": kite_mod.status(),
         "kite_mcp": {"connected": _kite_mcp_connected()},
+        "extension": extension_status(),
         "budget": Budget(led).status(),
         "bhavcopy": {"trading_days": bh["days"], "last": str(bh["last"]) if bh["last"] else None},
         "policies_confirmed": bool(u.get("policies_confirmed")),
@@ -377,7 +379,9 @@ class ETLists(BaseModel):
 @app.get("/api/et/lists")
 def et_lists():
     from . import ideas
-    return ideas.load_lists() | {"status": ideas.lists_status()}
+    from .settings import ROOT
+    return ideas.load_lists() | {"status": ideas.lists_status(), "extension": extension_status(),
+                                 "extension_path": str(ROOT / "browser" / "chrome-extension")}
 
 
 @app.post("/api/et/lists")
@@ -570,9 +574,31 @@ def _require_token(request: Request):
         raise HTTPException(401, "missing or invalid pairing token")
 
 
+EXT_FILE = SECRETS_DIR.parent / "settings" / "extension.json"
+
+
+def _ext_heartbeat(request: Request) -> None:
+    """The extension polls the queue every minute; remember that it is installed and paired."""
+    origin = request.headers.get("origin", "")
+    if not origin.startswith("chrome-extension://"):
+        return
+    info = {"last_seen": time.time(), "version": request.headers.get("x-ca-ext-version"),
+            "id": request.headers.get("x-ca-ext-id") or origin.split("//", 1)[1]}
+    EXT_FILE.write_text(json.dumps(info), encoding="utf-8")
+
+
+def extension_status() -> dict:
+    if not EXT_FILE.exists():
+        return {"connected": False, "ever_seen": False}
+    info = json.loads(EXT_FILE.read_text(encoding="utf-8"))
+    age = time.time() - info.get("last_seen", 0)
+    return {"connected": age < 180, "ever_seen": True, "seconds_ago": int(age), "version": info.get("version"), "id": info.get("id")}
+
+
 @app.get("/v1/research/queue")
 def v1_queue(request: Request):
     _require_token(request)
+    _ext_heartbeat(request)
     return [{k: q.get(k) for k in ("queue_id", "canonical_url", "symbol", "note", "status", "kind")}
             for q in inbox_mod.queue_list("pending")]
 

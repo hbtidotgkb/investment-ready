@@ -121,6 +121,18 @@ def test_demo_batch_runs_each_pick_and_writes_report():
     assert b["report_path"] and open(b["report_path"], encoding="utf-8").read().startswith("# Batch report")
 
 
+def test_extension_heartbeat_shows_connected():
+    from fastapi.testclient import TestClient
+    from ca_platform.service import app, pairing_token
+    c = TestClient(app, base_url="http://127.0.0.1:8765")
+    assert c.get("/api/health").json()["extension"]["connected"] in (False, True)
+    r = c.get("/v1/research/queue", headers={"x-ca-token": pairing_token(), "origin": "chrome-extension://abcdef",
+                                            "x-ca-ext-version": "0.5.0", "x-ca-ext-id": "abcdef"})
+    assert r.status_code == 200
+    ext = c.get("/api/health").json()["extension"]
+    assert ext["connected"] and ext["version"] == "0.5.0" and ext["id"] == "abcdef"
+
+
 def test_topic_url_from_equity_master():
     assert ideas.topic_url("TCS") == "https://economictimes.indiatimes.com/topic/tata-consultancy-services"
     assert ideas.topic_url("NOPE") is None
@@ -128,28 +140,32 @@ def test_topic_url_from_equity_master():
 
 # --------------------------------------------------------------------- Kite MCP ---
 
-def test_kite_mcp_refuses_write_tools(monkeypatch):
+def test_kite_mcp_policy_is_tool_plus_mode(monkeypatch):
     monkeypatch.setattr(kite_mcp, "_load_token", lambda: {"access_token": "x"})
-    for name in ("place_order", "modify_order", "cancel_order", "place_gtt_order", "delete_gtt_order", "exit_order"):
+    refused = [("orders", {"mode": "place"}), ("orders", {"mode": "list"}), ("gtt", {"mode": "create"}),
+               ("alerts", {"mode": "list"}), ("session", {"mode": "logout"}), ("portfolio", {"mode": "convert"}),
+               ("market", {}), ("help", {"key": "/"})]
+    for tool, args in refused:
         with pytest.raises(PermissionError):
-            asyncio.run(kite_mcp.call(name))
-    assert kite_mcp._allowed("get_holdings") and not kite_mcp._allowed("place_mf_sip")
+            asyncio.run(kite_mcp.call(tool, args))
+    for tool, mode in [("portfolio", "holdings"), ("market", "historical"), ("market", "ltp"), ("session", "status")]:
+        assert kite_mcp.allowed(tool, {"mode": mode})
 
 
-def test_kite_mcp_args_fit_live_schema():
-    kite_mcp._TOOLS_CACHE["tools"] = {"get_historical_data": {"properties": {"instrument_token": {}, "from_date": {}, "to_date": {}, "interval": {}},
-                                                              "required": ["instrument_token", "from_date", "to_date", "interval"]}}
-    out = kite_mcp._fit_args("get_historical_data", {("instrument_token", "token"): 1, ("from_date", "from"): "a",
-                                                     ("to_date", "to"): "b", ("interval",): "day"})
-    assert out == {"instrument_token": 1, "from_date": "a", "to_date": "b", "interval": "day"}
+def test_kite_mcp_rejects_unknown_args_after_schema_change():
+    kite_mcp._TOOLS_CACHE["tools"] = {"market": {"properties": {"mode": {}, "instrument_token": {}, "interval": {}}}}
+    kite_mcp._check_args("market", {"mode": "historical", "instrument_token": 1, "interval": "day"})
     with pytest.raises(kite_mcp.KiteMCPError):
-        kite_mcp._fit_args("get_historical_data", {("token_v2",): 1})
+        kite_mcp._check_args("market", {"mode": "historical", "token_v2": 1})
 
 
 def test_kite_mcp_parse_and_login_url(monkeypatch):
-    res = types.SimpleNamespace(isError=False, structuredContent=None,
-                                content=[types.SimpleNamespace(type="text", text=json.dumps([{"tradingsymbol": "TCS"}]))])
-    assert kite_mcp._parse(res) == [{"tradingsymbol": "TCS"}]
+    res = types.SimpleNamespace(is_error=False, structured_content=None,
+                                content=[types.SimpleNamespace(type="text", text=json.dumps({"data": [{"tradingsymbol": "TCS"}]}))])
+    assert kite_mcp._data(kite_mcp._parse(res)) == [{"tradingsymbol": "TCS"}]
+    err = types.SimpleNamespace(is_error=True, structured_content=None, content=[types.SimpleNamespace(type="text", text="boom")])
+    with pytest.raises(kite_mcp.KiteMCPError):
+        kite_mcp._parse(err)
     monkeypatch.setattr(kite_mcp, "_client_id", lambda uri: "client-123")
     url = kite_mcp.start_login("http://127.0.0.1:8765/kite-mcp/callback")
     q = parse_qs(urlparse(url).query)

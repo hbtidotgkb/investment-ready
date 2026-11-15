@@ -1,13 +1,14 @@
 """Zerodha's hosted Kite MCP server as a platform data source — READ-ONLY by construction.
 
-Login is the standard MCP OAuth flow the server advertises (authorization code + PKCE with
-dynamic client registration): the user clicks "Connect Kite (MCP)", logs in on Zerodha's page,
+Login is the standard MCP OAuth flow the server advertises (dynamic client registration +
+authorization code with PKCE): the user clicks "Connect Kite (MCP)", logs in on Zerodha's page,
 and the callback stores the access token locally (OS keychain, falling back to the git-ignored
 data/secrets folder). The token is never sent to the browser or to any model.
 
-Only tools in READ_TOOLS can be called; order/GTT/MF-order tools are refused in code even if
-the server offers them. Tool arguments are matched against each tool's live input schema, so a
-renamed parameter produces a clear error instead of a silent wrong call.
+The server exposes a few tools that switch on a `mode` argument (verified against the live
+server, 15 Nov 2026): portfolio, market, session, mutual_funds, orders, gtt, alerts, help.
+READ_POLICY whitelists (tool, mode) pairs; everything else — orders, GTT, alerts, session logout —
+is refused in code before any request is sent.
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ from ..settings import SECRETS_DIR, get_secret, set_secret
 
 BASE = "https://mcp.kite.trade"
 MCP_URL = f"{BASE}/mcp"
-READ_TOOLS = frozenset({
-    "get_profile", "get_margins", "get_holdings", "get_positions", "get_mf_holdings", "get_quotes", "get_ltp",
-    "get_ohlc", "get_historical_data", "search_instruments", "get_trades", "get_orders", "get_order_history",
-    "get_order_trades", "get_gtts",
-})
-WRITE_HINTS = ("place", "modify", "cancel", "delete", "exit", "convert", "sip")
+READ_POLICY: dict[str, frozenset[str]] = {
+    "portfolio": frozenset({"profile", "margins", "holdings", "positions"}),
+    "market": frozenset({"quote", "ltp", "ohlc", "historical", "search"}),
+    "session": frozenset({"status"}),
+    "mutual_funds": frozenset({"holdings"}),
+}
 
 _TOKEN_FILE = SECRETS_DIR / "kite_mcp_token.json"
 _CLIENT_FILE = SECRETS_DIR / "kite_mcp_client.json"
@@ -131,19 +132,23 @@ def complete_login(code: str, state: str) -> None:
 
 # --------------------------------------------------------------------- tool calls ---
 
-def _allowed(name: str) -> bool:
-    return name in READ_TOOLS and not any(h in name for h in WRITE_HINTS)
+def allowed(tool: str, args: dict) -> bool:
+    return args.get("mode") in READ_POLICY.get(tool, frozenset())
+
+
+def _leaf(e: BaseException) -> BaseException:
+    while isinstance(e, BaseExceptionGroup) and e.exceptions:
+        e = e.exceptions[0]
+    return e
 
 
 def _parse(result) -> Any:
-    if getattr(result, "isError", False):
+    if getattr(result, "is_error", False):
         txt = " ".join(getattr(c, "text", "") for c in (result.content or []))
-        if "auth" in txt.lower() or "login" in txt.lower() or "token" in txt.lower():
-            clear_token()
         raise KiteMCPError(f"Kite MCP tool error: {txt[:300]}")
-    sc = getattr(result, "structuredContent", None)
-    if sc:
-        return sc.get("result", sc) if isinstance(sc, dict) and set(sc) == {"result"} else sc
+    sc = getattr(result, "structured_content", None)
+    if sc is not None:
+        return sc
     texts = [getattr(c, "text", "") for c in (result.content or []) if getattr(c, "type", "") == "text"]
     joined = "\n".join(texts).strip()
     try:
@@ -152,13 +157,20 @@ def _parse(result) -> Any:
         return joined
 
 
+def _check_args(tool: str, args: dict) -> None:
+    props = set(((_TOOLS_CACHE.get("tools") or {}).get(tool) or {}).get("properties", {}) or {})
+    unknown = [k for k in args if props and k not in props]
+    if unknown:
+        raise KiteMCPError(f"Kite MCP tool '{tool}' no longer accepts {unknown} (schema changed)")
+
+
 async def _session_call(calls: list[tuple[str, dict]]) -> list[Any]:
+    for tool, args in calls:
+        if not allowed(tool, args):
+            raise PermissionError(f"Kite MCP call {tool}(mode={args.get('mode')!r}) is not in the read-only policy")
     tok = _load_token()
     if not tok:
         raise KiteMCPError("Kite MCP not connected — log in from the Portfolio page")
-    for name, _ in calls:
-        if not _allowed(name):
-            raise PermissionError(f"Kite MCP tool '{name}' is not in the read-only allowlist")
     from mcp import ClientSession
     from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
     http = create_mcp_http_client(headers={"Authorization": f"Bearer {tok['access_token']}"})
@@ -170,85 +182,72 @@ async def _session_call(calls: list[tuple[str, dict]]) -> list[Any]:
                     await s.initialize()
                     if "tools" not in _TOOLS_CACHE or time.time() - _TOOLS_CACHE.get("t", 0) > 3600:
                         tl = await s.list_tools()
-                        _TOOLS_CACHE["tools"] = {t.name: (t.inputSchema or {}) for t in tl.tools}
+                        _TOOLS_CACHE["tools"] = {t.name: (t.input_schema or {}) for t in tl.tools}
                         _TOOLS_CACHE["t"] = time.time()
-                    for name, args in calls:
-                        if name not in _TOOLS_CACHE["tools"]:
-                            raise KiteMCPError(f"Kite MCP server no longer offers '{name}'")
-                        out.append(_parse(await s.call_tool(name, _fit_args(name, args))))
-    except BaseExceptionGroup as eg:  # anyio task groups wrap errors
-        first = eg.exceptions[0]
-        if "401" in str(first):
+                    for tool, args in calls:
+                        if tool not in _TOOLS_CACHE["tools"]:
+                            raise KiteMCPError(f"Kite MCP server no longer offers '{tool}'")
+                        _check_args(tool, args)
+                        out.append(_parse(await s.call_tool(tool, args)))
+    except BaseExceptionGroup as eg:  # anyio task groups wrap the real error
+        leaf = _leaf(eg)
+        if isinstance(leaf, (KiteMCPError, PermissionError)):
+            raise leaf
+        if "401" in str(leaf) or "unauthor" in str(leaf).lower():
             clear_token()
-            raise KiteMCPError("Kite MCP session expired — log in again") from first
-        raise KiteMCPError(f"Kite MCP call failed: {type(first).__name__}: {str(first)[:200]}") from first
+            raise KiteMCPError("Kite MCP login expired — connect again") from leaf
+        raise KiteMCPError(f"Kite MCP call failed: {type(leaf).__name__}: {str(leaf)[:200]}") from leaf
     return out
 
 
-def _fit_args(name: str, args: dict) -> dict:
-    """Map our argument names onto the tool's live schema (first matching alias wins)."""
-    schema = _TOOLS_CACHE["tools"].get(name, {})
-    props = set((schema.get("properties") or {}).keys())
-    fitted = {}
-    for keys, val in args.items():
-        aliases = keys if isinstance(keys, tuple) else (keys,)
-        hit = next((a for a in aliases if a in props), None)
-        if hit is None:
-            raise KiteMCPError(f"Kite MCP tool '{name}' schema changed: none of {aliases} in {sorted(props)}")
-        fitted[hit] = val
-    missing = [r for r in schema.get("required", []) if r not in fitted]
-    if missing:
-        raise KiteMCPError(f"Kite MCP tool '{name}' needs {missing}")
-    return fitted
-
-
-async def call(name: str, args: dict | None = None) -> Any:
-    """args keys may be a name or a tuple of accepted aliases, e.g. {("from_date", "from"): "..."}."""
-    return (await _session_call([(name, args or {})]))[0]
+async def call(tool: str, args: dict) -> Any:
+    return (await _session_call([(tool, args)]))[0]
 
 
 # ----------------------------------------------------------------- data helpers ---
+
+def _data(d: Any) -> Any:
+    return d.get("data") if isinstance(d, dict) and "data" in d else d
+
 
 async def status() -> dict:
     if not connected():
         return {"state": "not_connected", "message": "Kite MCP not connected — click Connect (free; uses Zerodha's hosted MCP)."}
     try:
-        p = await call("get_profile")
-        name = p.get("user_shortname") if isinstance(p, dict) else None
-        return {"state": "connected", "message": "Kite MCP connected (read-only)" + (f" — {name}" if name else "")}
-    except PermissionError:
-        raise
+        s = await call("session", {"mode": "status"})
     except Exception as e:
-        return {"state": "login_required", "message": f"Kite MCP needs login again ({str(e)[:120]})"}
-
-
-def _rows(data: Any, key_guess: tuple[str, ...] = ("data", "holdings", "candles", "results")) -> list:
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for k in key_guess:
-            if isinstance(data.get(k), list):
-                return data[k]
-    return []
+        return {"state": "login_required", "message": f"Kite MCP needs login again ({str(e)[:140]})"}
+    if not isinstance(s, dict) or not s.get("authenticated"):
+        return {"state": "login_required", "message": "Kite MCP session not authenticated — connect again"}
+    if s.get("kite_session_expired"):
+        return {"state": "login_required", "message": "Kite session expired (Kite sessions end daily around 6 AM) — connect again"}
+    return {"state": "connected", "message": f"Kite MCP connected (read-only) · Kite session valid until {s.get('kite_session_expires_at', '—')}",
+            "kite_session_expires_at": s.get("kite_session_expires_at")}
 
 
 async def holdings() -> list[dict]:
-    rows = _rows(await call("get_holdings"))
-    out = []
-    for h in rows:
-        out.append({"symbol": h.get("tradingsymbol"), "exchange": h.get("exchange"), "isin": h.get("isin"),
-                    "quantity": (h.get("quantity") or 0) + (h.get("t1_quantity") or 0),
-                    "average_price": h.get("average_price"), "last_price": h.get("last_price"), "pnl": h.get("pnl"),
-                    "day_change_pct": h.get("day_change_percentage"), "via": "kite_mcp",
-                    "note": "Average price is not a tax-lot history (spec §9 Tax)."})
-    return out
+    rows, start = [], 0
+    while True:
+        d = await call("portfolio", {"mode": "holdings", "type": "full", "limit": 500, "from": start})
+        page = _data(d) or []
+        rows += page
+        pg = d.get("pagination", {}) if isinstance(d, dict) else {}
+        if not pg.get("has_more") or not page:
+            break
+        start += len(page)
+    return [{"symbol": h.get("tradingsymbol"), "exchange": h.get("exchange"), "isin": h.get("isin"),
+             "quantity": (h.get("quantity") or 0) + (h.get("t1_quantity") or 0),
+             "average_price": h.get("average_price"), "last_price": h.get("last_price"), "pnl": h.get("pnl"),
+             "day_change_pct": h.get("day_change_percentage"), "via": "kite_mcp",
+             "note": "Average price is not a tax-lot history (spec §9 Tax)."} for h in rows]
 
 
 async def instrument_token(symbol: str) -> int | None:
-    res = _rows(await call("search_instruments", {("query", "q"): symbol.upper()}))
-    for r in res:
-        if str(r.get("tradingsymbol", "")).upper() == symbol.upper() and r.get("exchange") in ("NSE", None):
-            return int(r.get("instrument_token"))
+    d = await call("market", {"mode": "search", "search_mode": "get_by_tradingsymbol", "exchange": "NSE",
+                              "tradingsymbol": symbol.upper()})
+    for r in _data(d) or []:
+        if str(r.get("tradingsymbol", "")).upper() == symbol.upper() and r.get("exchange") == "NSE":
+            return int(r["instrument_token"])
     return None
 
 
@@ -258,29 +257,22 @@ async def candles(symbol: str, days: int = 400) -> list[dict]:
         return []
     to = datetime.now()
     frm = to - timedelta(days=int(days * 1.5))
-    data = await call("get_historical_data", {
-        ("instrument_token", "token"): tok, ("from_date", "from"): frm.strftime("%Y-%m-%d 09:15:00"),
-        ("to_date", "to"): to.strftime("%Y-%m-%d 15:30:00"), ("interval",): "day"})
+    d = await call("market", {"mode": "historical", "instrument_token": tok, "interval": "day",
+                              "from_date": frm.strftime("%Y-%m-%d"), "to_date": to.strftime("%Y-%m-%d")})
     out = []
-    for d in _rows(data):
-        if isinstance(d, dict):
-            out.append({"date": str(d.get("date"))[:10], "open": float(d["open"]), "high": float(d["high"]),
-                        "low": float(d["low"]), "close": float(d["close"]), "volume": float(d.get("volume") or 0),
-                        "source_file": "kite_mcp:get_historical_data"})
-        elif isinstance(d, list) and len(d) >= 6:  # [date, o, h, l, c, v]
-            out.append({"date": str(d[0])[:10], "open": float(d[1]), "high": float(d[2]), "low": float(d[3]),
-                        "close": float(d[4]), "volume": float(d[5]), "source_file": "kite_mcp:get_historical_data"})
+    for c in _data(d) or []:
+        out.append({"date": str(c.get("date"))[:10], "open": float(c["open"]), "high": float(c["high"]),
+                    "low": float(c["low"]), "close": float(c["close"]), "volume": float(c.get("volume") or 0),
+                    "source_file": "kite_mcp:market/historical"})
     return out
 
 
 async def ltp(symbols: list[str]) -> dict[str, float]:
     if not symbols:
         return {}
-    data = await call("get_ltp", {("instruments",): [f"NSE:{s.upper()}" for s in symbols]})
+    d = await call("market", {"mode": "ltp", "instruments": [f"NSE:{s.upper()}" for s in symbols[:500]]})
     out = {}
-    if isinstance(data, dict):
-        for k, v in data.items():
-            price = v.get("last_price") if isinstance(v, dict) else None
-            if price is not None:
-                out[k.split(":")[-1]] = float(price)
+    for k, v in (_data(d) or {}).items():
+        if isinstance(v, dict) and v.get("last_price") is not None:
+            out[k.split(":")[-1]] = float(v["last_price"])
     return out

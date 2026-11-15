@@ -18,8 +18,10 @@
 
 <section class="box">
   <div class="row"><h3>Article queue</h3><span class="spacer"></span><span id="qcount" class="pill">—</span></div>
-  <p class="hint">Links you queued on the Personal CA Research inbox page. Each opens in a background tab of <b>your</b> signed-in Chrome, is captured, closed and sent. Stops at login or challenge pages.</p>
-  <div class="row"><button id="q-fetch" class="btn primary">Fetch queued articles</button><button id="q-cancel" class="btn" hidden>Stop</button><button id="q-refresh" class="btn sm">↻</button></div>
+  <p class="hint">Articles from your Personal CA "ET Prime &amp; ideas" lists. Each opens in a background tab of <b>your</b> signed-in Chrome, is captured, closed and sent. Stops at login or challenge pages.</p>
+  <label class="attest"><input type="checkbox" id="auto"> Auto-fetch: capture new queued articles automatically (checked every minute while Chrome is open)</label>
+  <div class="row"><button id="q-fetch" class="btn primary">Fetch queued articles now</button><button id="q-cancel" class="btn">Stop</button><button id="q-refresh" class="btn sm">↻</button></div>
+  <div id="qrun" class="hint"></div>
   <div id="qlist"></div>
   <div class="row" style="margin-top:8px"><input id="q-sym" type="text" placeholder="Stock tag (optional)" style="width:140px;text-transform:uppercase"><button id="q-addtab" class="btn sm">Add this tab</button><button id="q-scan" class="btn sm">Scan page for articles</button></div>
   <div id="scan"></div>

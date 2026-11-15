@@ -52,6 +52,14 @@ function personalCaExtract(mode, maxChars) {
       clean(root.innerText).split(/\n{1,}/).filter((t) => t.length > 30).forEach((t) => { if (!seen.has(t)) out.passages.push(t); });
       out.access_warnings.push('paragraph_structure_not_found — text split by lines');
     }
+    // Data tables (e.g. "stocks with upside" lists) are sometimes rendered outside the text block.
+    document.querySelectorAll('table').forEach((tb) => {
+      if (root.contains(tb) || !visible(tb) || tb.closest('nav, footer, aside, header')) return;
+      const rows = [...tb.querySelectorAll('tr')].map((tr) => [...tr.querySelectorAll('th,td')].map((c) => clean(c.innerText)).join(' | ')).filter((r) => r.replace(/[|\s]/g, ''));
+      if (rows.length < 2) return;
+      const t = '[table]\n' + rows.join('\n');
+      if (!seen.has(t)) { seen.add(t); out.passages.push(t); }
+    });
     const pay = [...document.querySelectorAll('[class*="paywall"], [class*="subscribe"], [class*="prime_lock"], [class*="locked"]')].filter(visible);
     if (pay.length) out.access_warnings.push('possible_paywall_or_preview — verify the end of the article is present');
     out.related_links = [...root.querySelectorAll('a[href]')].map((a) => a.href).filter((h) => h.startsWith(location.origin) && h !== location.href).slice(0, 30);

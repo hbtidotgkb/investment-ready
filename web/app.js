@@ -680,6 +680,24 @@ function listStatusTable(rows) {
 
 let ET = { top: null, ranking: null, picked: new Set() };
 
+function extBanner(ext, path, pending) {
+  if (ext && ext.connected) {
+    return `<div class="notice info"><b>✓ Personal CA extension v${esc(ext.version || '?')} connected</b> (checked in ${ext.seconds_ago}s ago).
+      ${pending ? `${pending} article(s) waiting — with Auto-fetch on they are captured within about a minute.` : 'Nothing waiting.'}
+      <button class="btn sm" id="ext-fetch" style="margin-left:8px">Fetch now</button></div>`;
+  }
+  return `<div class="notice bad"><b>The Personal CA extension is not connected${ext && ext.ever_seen ? ` (last seen ${Math.round(ext.seconds_ago / 60)} min ago — is Chrome open?)` : ''}.</b>
+    Articles are read in your own Chrome by this project's extension (v0.5.0) — <i>not</i> the older "Personal CA Research Companion 0.1.1" prototype. Set it up once:
+    <ol class="small" style="margin:6px 0 0">
+      <li>Chrome → <code>chrome://extensions</code> → turn on <b>Developer mode</b> (top right).</li>
+      <li>Disable or remove the old <b>Personal CA Research Companion 0.1.1</b> to avoid confusion.</li>
+      <li>Click <b>Load unpacked</b> and choose <code>${esc(path)}</code>. (Already loaded? Click its ↻ reload icon.)</li>
+      <li>Click the extension's toolbar icon → side panel → <b>Settings</b> → paste the pairing token from <a href="#/system">System</a> → <b>Save &amp; test</b>.</li>
+      <li>Tick the personal-research attestation, click <b>Allow ET access</b>, and keep <b>Auto-fetch</b> on.</li>
+    </ol>
+    Within a minute this banner turns green and queued articles start arriving.${pending ? ` <b>${pending} article(s) are waiting.</b>` : ''}</div>`;
+}
+
 async function viewET() {
   const [lists, batches] = await Promise.all([api('/api/et/lists'), api('/api/batches').catch(() => [])]);
   ET.top = ET.top || store.get('ca-idea-top', (HEALTH && HEALTH.display && HEALTH.display.top_sources) || 8);
@@ -688,7 +706,7 @@ async function viewET() {
   $('#app').innerHTML = `
   <div class="card"><h2>ET Prime &amp; stock ideas</h2>
     <p class="muted">Two lists you can edit any time (saved to <code>${esc(st.file)}</code>, also editable by hand). Saving queues every article not yet captured. Then open the Personal CA extension in Chrome and click <b>Fetch queued articles</b> — it reads each article in <i>your</i> signed-in browser and sends it here.</p>
-    ${pending ? `<div class="notice info">${pending} article(s) waiting to be captured — open the extension and click <b>Fetch queued articles</b>.</div>` : ''}
+    ${extBanner(lists.extension, lists.extension_path, pending)}
     <div class="grid g2">
       <div><h3>1 · News articles <span class="muted small">(${lists.news_articles.length})</span></h3>
         <p class="small muted">Any ET / ET Prime article. Each becomes a news source for whichever stock it mentions (or the stock you link it to) in future analyses.</p>
@@ -720,6 +738,20 @@ async function viewET() {
       viewET();
     } catch (e) { toast(e.message); }
   };
+  const fn = $('#ext-fetch');
+  if (fn) fn.onclick = () => {
+    const id = lists.extension.id;
+    if (!(window.chrome && chrome.runtime && chrome.runtime.sendMessage)) { toast('Open the extension side panel and click "Fetch queued articles now"'); return; }
+    try {
+      chrome.runtime.sendMessage(id, { type: 'fetchNow' }, (r) => {
+        if (chrome.runtime.lastError || !r) { toast('Could not reach the extension — use its side panel'); return; }
+        toast(r.error ? r.error : r.busy ? 'Already fetching' : `Fetched: ${r.done || 0} captured, ${r.failed || 0} failed`);
+        viewET();
+      });
+      toast('Fetching in your browser…');
+    } catch (e) { toast('Use the extension side panel: ' + e.message); }
+  };
+  if (pending && lists.extension.connected) setTimeout(() => { if (location.hash.startsWith('#/et')) viewET(); }, 20000);
   $('#l-save').onclick = () => save(false);
   $('#l-recap').onclick = () => save(true);
   $('#scan-go').onclick = async () => { const s = $('#scan-sym').value.trim(); if (!s) return; try { const r = await api('/api/et/scan', { method: 'POST', body: { symbol: s } }); toast(r.added.length ? 'Topic scan queued' : (r.rejected[0] || {}).reason || 'Not queued'); } catch (e) { toast(e.message); } };
@@ -824,6 +856,8 @@ async function viewPortfolio() {
       <p class="small muted">Average price is not a tax-lot history; lot-level tax needs your broker's transaction export.</p>` : ''}</div>`;
   $$('[data-sym]').forEach((b) => (b.onclick = async () => { const r2 = await api('/api/runs', { method: 'POST', body: { symbol: b.dataset.sym, horizon: 'medium', action: 'continue_holding', mode: 'live' } }).catch((e) => toast(e.message)); if (r2) location.hash = `#/run/${r2.run_id}`; }));
   const off = $('#mcp-off'); if (off) off.onclick = async () => { await api('/api/kite-mcp/disconnect', { method: 'POST' }); toast('Kite MCP disconnected'); viewPortfolio(); };
+  if (location.hash.includes('kite_mcp=failed')) toast('Kite MCP login did not complete — try Connect again');
+  if (location.hash.includes('kite_mcp=connected')) toast(m.state === 'connected' ? 'Kite MCP connected' : 'Logged in, but the Kite MCP check failed: ' + m.message);
 }
 
 /* --------------------------------------------------------------- system */

@@ -125,12 +125,13 @@ Without it, Forensic coverage is low: the governance score is withheld and buys 
 
 ## Chrome extension (ET Prime capture)
 
-`browser/chrome-extension/` is a Manifest V3 side panel, v0.3.0.
+`browser/chrome-extension/` is a Manifest V3 extension, v0.5.0, with a side panel and a background worker. It ships with this repo. It is **not** the older "Personal CA Research Companion 0.1.1" prototype; disable that one.
 
 **Set up once**
 1. `chrome://extensions` → Developer mode → **Load unpacked** → select `browser/chrome-extension`. After a `git pull`, click the extension's reload ↻ icon.
-2. In Personal CA → **System**, copy the pairing token. In the extension → **Settings**, paste it.
-3. Tick the personal-research attestation, then click **Allow ET access**. This grants `economictimes.indiatimes.com` only, not all sites.
+2. In Personal CA → **System**, copy the pairing token. In the extension → **Settings**, paste it, then click **Save & test**.
+3. Tick the personal-research attestation, click **Allow ET access** (grants `economictimes.indiatimes.com` only), and leave **Auto-fetch** on.
+4. The ET Prime page turns green: **"Extension v0.5.0 connected"**. The extension checks in every minute, and with Auto-fetch on it captures newly queued articles in background tabs of your own Chrome, with no clicks needed. **Fetch now** on the ET page, or in the side panel, starts a fetch immediately.
 
 **Queue several ET articles: the main workflow**
 1. In Personal CA → **Research inbox → ET Prime article queue**, paste ET links, one per line. Optionally tag a stock, e.g. `TCS`. From the extension you can also use **Add this tab**, or open an ET listing or topic page and use **Scan page for articles** to tick links to queue.

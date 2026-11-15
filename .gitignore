@@ -21,3 +21,7 @@ Thumbs.db
 
 # Browser extension packaging
 browser/*.zip
+
+# Extension packaging artefacts (never commit a signing key)
+browser/*.crx
+browser/*.pem
