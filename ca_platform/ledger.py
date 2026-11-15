@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS research_sources (source_id VARCHAR, version INTEGER,
 CREATE TABLE IF NOT EXISTS ingestion_receipts (receipt_id VARCHAR PRIMARY KEY, created_at VARCHAR, body JSON);
 CREATE TABLE IF NOT EXISTS research_claims (claim_id VARCHAR PRIMARY KEY, source_id VARCHAR, version INTEGER,
   symbol VARCHAR, created_at VARCHAR, status VARCHAR, body JSON);
+CREATE TABLE IF NOT EXISTS loop_records (run_id VARCHAR, loop INTEGER, created_at VARCHAR, body JSON,
+  PRIMARY KEY (run_id, loop));
+CREATE TABLE IF NOT EXISTS capture_queue (queue_id VARCHAR PRIMARY KEY, url VARCHAR, canonical_url VARCHAR,
+  symbol VARCHAR, note VARCHAR, status VARCHAR, created_at VARCHAR, updated_at VARCHAR, source_id VARCHAR,
+  version INTEGER, error VARCHAR);
 CREATE TABLE IF NOT EXISTS alerts (alert_id VARCHAR PRIMARY KEY, created_at VARCHAR, symbol VARCHAR,
   type VARCHAR, message VARCHAR, acknowledged BOOLEAN);
 """

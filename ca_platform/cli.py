@@ -22,7 +22,7 @@ def _print_events(run_id: str):
 def cmd_analyse(a):
     from .orchestrator import run_analysis
     print(f"Analysing {a.symbol or 'DEMO'} · horizon {a.horizon} · mode {a.mode} …")
-    r = asyncio.run(run_analysis(a.symbol, a.horizon, a.action, a.mode))
+    r = asyncio.run(run_analysis(a.symbol, a.horizon, a.action, a.mode, loops=a.loops))
     _print_events(r["run_id"])
     if r.get("status") == "failed":
         print(f"\nRun failed: {r['error']}")
@@ -86,6 +86,7 @@ def main(argv=None):
     s.add_argument("--horizon", choices=["short", "medium", "long"], default="medium")
     s.add_argument("--action", choices=["new_purchase", "additional_purchase", "continue_holding", "reduce_exit"], default="new_purchase")
     s.add_argument("--mode", choices=["live", "demo"], default="live")
+    s.add_argument("--loops", type=int, default=1, help="Analysis loops (each re-fetches evidence with open questions)")
     s.set_defaults(fn=cmd_analyse)
     s = sub.add_parser("serve", help="Start the local web UI and extension endpoint")
     s.add_argument("--port", type=int)
@@ -98,7 +99,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_equity)
     s = sub.add_parser("secrets", help="Store a secret in the OS keychain")
     s.add_argument("action", choices=["set"])
-    s.add_argument("name", choices=["ANTHROPIC_API_KEY", "KITE_API_KEY", "KITE_API_SECRET"])
+    s.add_argument("name", choices=["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "KITE_API_KEY", "KITE_API_SECRET"])
     s.set_defaults(fn=cmd_secrets)
     s = sub.add_parser("import-captures", help="Import an exported capture JSON (extension fallback)")
     s.add_argument("file")

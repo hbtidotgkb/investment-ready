@@ -15,12 +15,17 @@ from .settings import iso
 class MockGateway:
     available = True
 
-    def __init__(self, ledger, run_id: str, bundle: Bundle, log=None):
+    def __init__(self, ledger, run_id: str, bundle: Bundle, log=None, loop: int = 1):
         self.ledger, self.run_id, self.b = ledger, run_id, bundle
         self.log = log or (lambda s, m: None)
+        self.loop = loop
         self.total_cost = 0.0
+        self.unknown_cost_calls = 0
         self.fallback_events: list = []
         self.critique: CritiqueLLM | None = None
+
+    def available_for(self, role):
+        return True
 
     # -- helpers
     def cite(self, title_part: str, i: int = 0, words: int = 9) -> Cite:
@@ -49,9 +54,9 @@ class MockGateway:
         errs = semantic_check(obj) if semantic_check else []
         if errs:
             self.log(stage, f"DEMO output validation issues: {errs[:2]}")
-        rec = {"request_id": f"req-{uuid.uuid4().hex[:12]}", "role": role, "model": "mock-demo",
+        rec = {"request_id": f"req-{uuid.uuid4().hex[:12]}", "role": role, "model": "mock-demo", "provider": "demo",
                "served_model": "mock-demo", "prompt_version": f"{role}@2.0.0", "input_tokens": len(user) // 4,
-               "output_tokens": len(obj.model_dump_json()) // 4, "cost_usd": 0.0, "latency_ms": 0,
+               "output_tokens": len(obj.model_dump_json()) // 4, "cost_usd": 0.0, "price_known": True, "latency_ms": 0,
                "cache_hit": False, "created_at": iso(), "attempts": [{"attempt": 0, "errors": errs}]}
         self.ledger.execute("INSERT INTO request_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             [rec["request_id"], self.run_id, role, "mock-demo", rec["prompt_version"], "demo", None,
@@ -94,7 +99,7 @@ class MockGateway:
             would_change_mind=["Close below the pattern stop", "Results showing margin dilution from rail orders"])
 
     def _news(self, _m):
-        return BrainReportLLM(
+        r = BrainReportLLM(
             specialist_conclusion="supportive",
             headline="A Rs 420 crore order was officially disclosed; margins on it are unknown and a broker view is attributed only.",
             statements=[
@@ -116,10 +121,21 @@ class MockGateway:
             red_flags=[], missing_evidence=["Order margin disclosure", "Consensus expectations before the order"],
             stances=[HorizonStance(horizon="medium", stance="attractive", rationale="Order adds visibility.")],
             scenarios=[], would_change_mind=["Contract not signed within the stated period", "Margin guidance cut"])
+        return self._news_loop(r) if self.loop > 1 else r
+
+    def _news_loop(self, r: BrainReportLLM) -> BrainReportLLM:
+        """Loop 2+: targeted discovery found the order-margin disclosure."""
+        m = self.find("expected to be about 11%")
+        r.statements.insert(2, Statement(kind="observation", text="Management guides the rail-order EBITDA margin to about 11%, below the recent 14% average.", cites=[m]))
+        r.headline = "Order win is officially disclosed; newly found guidance says its margin (~11%) is below the company average."
+        r.specialist_conclusion = "neutral"
+        r.missing_evidence = ["Consensus expectations before the order"]
+        r.checks.append(Check(name="margin_disclosure", result="watch", materiality="major", note="Order margin below average — dilutive.", cites=[m]))
+        return r
 
     def _forensic(self, _m):
         F = self.find
-        return BrainReportLLM(
+        r = BrainReportLLM(
             specialist_conclusion="neutral",
             headline="Cash conversion and audit look clean; headline growth flatters underlying growth because of a land-sale gain.",
             statements=[
@@ -142,6 +158,15 @@ class MockGateway:
             red_flags=[], missing_evidence=["Receivable/inventory days", "Contingent liabilities", "Tax rate reconciliation"],
             stances=[], scenarios=[], governance_score=None,
             would_change_mind=["Receivable days rising faster than revenue", "Auditor change or qualification"])
+        if self.loop > 1:  # targeted discovery answered two coverage gaps
+            for c in r.checks:
+                if c.name == "receivable_inventory_days":
+                    c.result, c.note, c.cites = "watch", "Receivable days 62 vs 58 with revenue +12% — slight stretch.", [F("Receivable days were 62")]
+                if c.name == "contingent_liabilities":
+                    c.result, c.note, c.cites = "pass", "4% of net worth, mostly performance guarantees.", [F("Contingent liabilities were 4%")]
+            r.missing_evidence = ["Tax rate reconciliation", "Capital work-in-progress ageing"]
+            r.statements.append(Statement(kind="observation", text="Receivable days rose to 62 from 58.", cites=[F("Receivable days were 62")]))
+        return r
 
     def _head(self, model):
         c = self.b.price.get("close") or 1200
@@ -159,6 +184,11 @@ class MockGateway:
             invalidation_conditions=["Close below the pattern stop", "Definitive contract not signed"],
             material_dissent=["Forensic: headline growth flattered by a one-time gain"],
             portfolio_limitations=["Portfolio context missing — research only, not a personalised allocation"])
+        if self.loop > 1:  # the Head has seen loop 1 (via <previous_loop>) and the new margin evidence
+            draft = draft.model_copy(update={
+                "decision": "wait", "head_score": 50,
+                "summary": "Still wait: loop 2 settled the forensic gaps, but the pattern is unconfirmed and the order margin (~11%) is dilutive.",
+                "reasons": draft.reasons + [Statement(kind="observation", text="Order margin guided to about 11%.", cites=[self.find("expected to be about 11%")])]})
         if model is HeadDecisionLLM:
             return draft
         objs = self.critique.objections if self.critique else []
@@ -172,8 +202,9 @@ class MockGateway:
                 responses.append(ObjectionResponse(objection_id=o.id, action="accept", test_result="passed",
                                                    explanation="Base case restated on underlying growth; target labelled technical.",
                                                    cites=[self.find("excluding a one-time gain")], decision_effect="assumptions clarified"))
-        final = draft.model_copy(update={"decision": "wait", "head_score": 52,
-                                         "summary": "Wait for pattern confirmation before buying; order win is real but margin impact is unknown."})
+        final = draft if self.loop > 1 else draft.model_copy(update={
+            "decision": "wait", "head_score": 52,
+            "summary": "Wait for pattern confirmation before buying; order win is real but margin impact is unknown."})
         return HeadFinalLLM(responses=responses, final=final)
 
     def _critic(self, _m):
@@ -189,6 +220,8 @@ class MockGateway:
                           cites=[self.find("excluding a one-time gain")], decision_impact="Valuation support is weaker than implied.",
                           settling_test=SettlingTest(description="Restate the base case using underlying growth.")),
             ])
+        if self.loop > 1:  # obj-2 was settled last loop and is not repeated; the blocker is re-tested
+            self.critique.objections = [self.critique.objections[0]]
         return self.critique
 
     async def web_discovery(self, **kw):

@@ -24,10 +24,11 @@ from . import inbox as inbox_mod
 from .contracts import CaptureBatch
 from .data import kite as kite_mod
 from .events import PHASES, REGISTRY, STAGES
-from .gateway import Budget, Gateway
+from .gateway import Budget, Gateway, missing_keys, model_catalog, vendor_separation
 from .ledger import get_ledger
-from .orchestrator import run_analysis
-from .settings import SECRETS_DIR, WEB, config, config_versions, get_secret, reload_config
+from .orchestrator import PANEL_ROLES, max_loops, run_analysis
+from .settings import (PROVIDER_KEYS, SECRETS_DIR, WEB, config, config_versions, get_secret, read_override,
+                       reload_config, write_override)
 
 MAX_BODY = 2_000_000
 TOKEN_FILE = SECRETS_DIR / "pairing_token"
@@ -100,17 +101,89 @@ def health():
     led = get_ledger()
     bh = led.fetchone("SELECT COUNT(DISTINCT date) AS days, MAX(date) AS last FROM bhav_daily")
     tax = config("tax_rates")
+    u = config("user")
     return {
         "anthropic": {"configured": bool(get_secret("ANTHROPIC_API_KEY"))},
+        "openai": {"configured": bool(get_secret("OPENAI_API_KEY"))},
+        "panel_missing_keys": missing_keys(PANEL_ROLES),
         "kite": kite_mod.status(),
         "budget": Budget(led).status(),
         "bhavcopy": {"trading_days": bh["days"], "last": str(bh["last"]) if bh["last"] else None},
-        "policies_confirmed": bool(config("user").get("policies_confirmed")),
-        "capital_configured": bool(config("user")["capital"].get("total_investment_capital_inr")),
+        "policies_confirmed": bool(u.get("policies_confirmed")),
+        "capital_configured": bool(u["capital"].get("total_investment_capital_inr")),
         "tax_policy": {"review_status": tax.get("review_status"), "version": tax.get("version")},
-        "vendor_separation": config("models").get("vendor_separation"),
-        "models": {r: v["model"] for r, v in config("models")["roles"].items()},
+        "vendor_separation": vendor_separation(),
+        "models": {r: f"{v.get('provider', 'anthropic')}:{v['model']}" for r, v in config("models")["roles"].items()},
+        "analysis": {"default_loops": (u.get("analysis") or {}).get("default_loops", 1), "max_loops": max_loops()},
+        "display": {"top_sources": (u.get("display") or {}).get("top_sources", 8)},
+        "queue_pending": led.fetchone("SELECT COUNT(*) AS n FROM capture_queue WHERE status IN ('pending','in_progress')")["n"],
     }
+
+
+# ---------------------------------------------------------------- models ---
+
+ROLE_HELP = {
+    "quant": "Quant brain — valuation, setup, entry conditions",
+    "news": "News & Narrative brain — what changed, materiality, priced-in",
+    "forensic": "Forensic CA brain — reliability of numbers, governance",
+    "head": "Head CA — drafts and finalises the decision",
+    "critic": "Critic CA — attacks the draft (best on a different provider than Head)",
+    "claims": "Inbox claim extraction",
+    "discovery": "Evidence discovery (Claude web search, allow-listed domains)",
+    "research_qa": "Research Q&A over captures (Claude Citations API)",
+}
+
+
+@app.get("/api/models")
+def models_get():
+    m = config("models")
+    return {"roles": m["roles"], "providers": m["providers"], "locked": m.get("locked_roles", {}), "help": ROLE_HELP,
+            "pricing": m["pricing_usd_per_mtok"], "separation": vendor_separation(), "version": m["version"],
+            "keys": {p: bool(get_secret(k)) for p, k in PROVIDER_KEYS.items()}}
+
+
+@app.get("/api/models/catalog")
+async def models_catalog(provider: str, refresh: bool = False):
+    if provider not in PROVIDER_KEYS:
+        raise HTTPException(400, "unknown provider")
+    return await asyncio.to_thread(model_catalog, provider, refresh)
+
+
+class RoleSetting(BaseModel):
+    provider: str
+    model: str
+    effort: str = "high"
+
+
+class ModelsUpdate(BaseModel):
+    roles: dict[str, RoleSetting]
+    pricing: dict[str, dict[str, float]] = {}
+
+
+@app.post("/api/models")
+def models_set(req: ModelsUpdate):
+    m = config("models")
+    locked = m.get("locked_roles", {})
+    ov = read_override("models")
+    ov.setdefault("roles", {})
+    for role, s in req.roles.items():
+        if role not in m["roles"]:
+            raise HTTPException(400, f"unknown role {role}")
+        if s.provider not in PROVIDER_KEYS:
+            raise HTTPException(400, f"unsupported provider {s.provider}")
+        if role in locked and s.provider != locked[role]:
+            raise HTTPException(400, f"{role} is locked to {locked[role]} (provider-specific tool)")
+        if s.effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise HTTPException(400, "effort must be low|medium|high|xhigh|max")
+        if not s.model.strip() or len(s.model) > 100:
+            raise HTTPException(400, "model id required")
+        ov["roles"][role] = {"provider": s.provider, "model": s.model.strip(), "effort": s.effort}
+    for model_id, p in req.pricing.items():
+        if set(p) != {"input", "output"} or min(p.values()) < 0:
+            raise HTTPException(400, "pricing needs non-negative input and output USD per million tokens")
+        ov.setdefault("pricing_usd_per_mtok", {})[model_id] = p
+    write_override("models", ov)
+    return models_get()
 
 
 @app.post("/api/config/reload")
@@ -138,6 +211,7 @@ class RunRequest(BaseModel):
     horizon: str = "medium"
     action: str = "new_purchase"
     mode: str = "live"
+    loops: int = 1
 
 
 def _start(req: RunRequest) -> str:
@@ -147,10 +221,12 @@ def _start(req: RunRequest) -> str:
         raise HTTPException(400, "mode must be live or demo")
     if req.mode == "live" and not req.symbol.strip():
         raise HTTPException(400, "symbol required")
+    if not 1 <= req.loops <= max_loops():
+        raise HTTPException(400, f"loops must be between 1 and {max_loops()}")
     from .settings import now_ist
     import uuid
     run_id = f"run-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
-    t = asyncio.create_task(run_analysis(req.symbol, req.horizon, req.action, req.mode, run_id=run_id))
+    t = asyncio.create_task(run_analysis(req.symbol, req.horizon, req.action, req.mode, run_id=run_id, loops=req.loops))
     TASKS.add(t)
     t.add_done_callback(TASKS.discard)
     return run_id
@@ -178,8 +254,14 @@ def get_run(run_id: str):
     b = led.fetchone("SELECT body FROM bundles WHERE bundle_id=?", [run["bundle_id"]]) if run["bundle_id"] else None
     calls = led.fetchall("SELECT request_id, role, model, prompt_version, input_tokens, output_tokens, web_searches, cost_usd, "
                          "latency_ms, status, created_at, provider_request_id FROM request_records WHERE run_id=? ORDER BY created_at", [run_id])
+    loops = [json.loads(r["body"]) for r in led.fetchall("SELECT body FROM loop_records WHERE run_id=? ORDER BY loop", [run_id])]
+    bundles = {}
+    for lr in loops:
+        bb = led.fetchone("SELECT body FROM bundles WHERE bundle_id=?", [lr["bundle_id"]])
+        if bb:
+            bundles[lr["bundle_id"]] = json.loads(bb["body"])
     return {"run": run, "decision_record": json.loads(v["body"]) if v else None,
-            "bundle": json.loads(b["body"]) if b else None, "calls": calls,
+            "bundle": json.loads(b["body"]) if b else None, "calls": calls, "loops": loops, "bundles": bundles,
             "events": REGISTRY[run_id].history if run_id in REGISTRY else led.events(run_id)}
 
 
@@ -259,12 +341,51 @@ def inbox_get(source_id: str, version: int | None = None):
 @app.post("/api/inbox/{source_id}/claims")
 async def inbox_claims(source_id: str):
     gw = Gateway(get_ledger(), run_id=f"inbox-{source_id}")
-    if not gw.available:
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured")
+    if missing_keys(["claims"]):
+        raise HTTPException(400, f"API key missing for the claims role: {', '.join(missing_keys(['claims']))}")
     try:
         return await inbox_mod.extract_claims(gw, source_id)
     except PermissionError as e:
         raise HTTPException(403, str(e))
+
+
+class LinkRequest(BaseModel):
+    symbol: str
+
+
+@app.post("/api/inbox/{source_id}/link")
+def inbox_link(source_id: str, req: LinkRequest):
+    from .data import nse
+    if not nse.lookup(req.symbol) and nse.equity_master():
+        raise HTTPException(400, f"{req.symbol} is not in the NSE equity list")
+    try:
+        return inbox_mod.link_symbol(source_id, req.symbol, method="user")
+    except KeyError:
+        raise HTTPException(404, "source not found")
+
+
+class QueueRequest(BaseModel):
+    urls: list[str]
+    symbol: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/queue")
+def queue_list():
+    return inbox_mod.queue_list()
+
+
+@app.post("/api/queue")
+def queue_add(req: QueueRequest):
+    if len(req.urls) > 50:
+        raise HTTPException(400, "at most 50 URLs per request")
+    return inbox_mod.queue_add(req.urls, req.symbol, req.note)
+
+
+@app.post("/api/queue/{queue_id}/cancel")
+def queue_cancel(queue_id: str):
+    inbox_mod.queue_update(queue_id, "cancelled")
+    return {"ok": True}
 
 
 @app.get("/api/pairing")
@@ -285,8 +406,55 @@ def v1_health():
 
 
 @app.post("/v1/research/captures")
-def v1_captures(batch: CaptureBatch):
-    return inbox_mod.ingest_batch(batch)
+async def v1_captures(batch: CaptureBatch):
+    receipt = await asyncio.to_thread(inbox_mod.ingest_batch, batch)
+    auto = (config("user").get("inbox") or {}).get("auto_extract_claims", True)
+    if auto and not receipt.get("replayed") and not missing_keys(["claims"]):
+        for it in receipt["items"]:
+            if it["status"] == "accepted" and it.get("usage_status") == "personal_research_user_attested":
+                t = asyncio.create_task(_auto_claims(it["source_id"]))
+                TASKS.add(t)
+                t.add_done_callback(TASKS.discard)
+        receipt["claims_extraction"] = "started in background"
+    return receipt
+
+
+async def _auto_claims(source_id: str):
+    try:
+        await inbox_mod.extract_claims(Gateway(get_ledger(), run_id=f"inbox-{source_id}"), source_id)
+    except Exception:
+        pass  # failures are visible as "0 claims" with a manual retry button in the UI
+
+
+def _require_token(request: Request):
+    if not secrets.compare_digest(request.headers.get("x-ca-token", ""), pairing_token()):
+        raise HTTPException(401, "missing or invalid pairing token")
+
+
+@app.get("/v1/research/queue")
+def v1_queue(request: Request):
+    _require_token(request)
+    return [{k: q[k] for k in ("queue_id", "canonical_url", "symbol", "note", "status")}
+            for q in inbox_mod.queue_list("pending")]
+
+
+@app.post("/v1/research/queue")
+def v1_queue_add(req: QueueRequest):
+    return inbox_mod.queue_add(req.urls[:20], req.symbol, req.note)
+
+
+class QueueStatus(BaseModel):
+    status: str
+    error: str | None = None
+
+
+@app.post("/v1/research/queue/{queue_id}/status")
+def v1_queue_status(queue_id: str, req: QueueStatus):
+    try:
+        inbox_mod.queue_update(queue_id, req.status, req.error)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 @app.get("/v1/research/receipts/{receipt_id}")

@@ -248,6 +248,7 @@ class CaptureItem(BaseModel):
     truncated: bool = False
     related_links: list[str] = Field(default_factory=list, max_length=50)
     usage_attested: bool = False               # user ticked "personal research use"
+    queue_id: Optional[str] = Field(default=None, max_length=60)   # set when captured from the article queue
 
 
 class CaptureBatch(BaseModel):

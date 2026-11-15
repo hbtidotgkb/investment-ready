@@ -48,11 +48,12 @@ class RunEvents:
         self.persist = persist
         self.stage_started: dict[str, float] = {}
         self.done = False
+        self.loop = 1  # current analysis loop; stamped on every event
 
     def emit(self, type_: str, stage: str | None = None, message: str = "",
              status: str | None = None, data: Any = None) -> dict:
         self.seq += 1
-        ev = {"run_id": self.run_id, "seq": self.seq, "ts": iso(), "type": type_,
+        ev = {"run_id": self.run_id, "seq": self.seq, "ts": iso(), "type": type_, "loop": self.loop,
               "stage": stage, "status": status, "message": message, "data": data}
         if type_ == "stage_start" and stage:
             self.stage_started[stage] = time.monotonic()

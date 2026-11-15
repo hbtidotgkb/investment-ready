@@ -32,6 +32,31 @@ flowchart LR
 | **Full audit trail** | Every model call is logged with role, prompt version, configured vs served model, provider request id, tokens, cost and latency, plus the full request and response. Identical requests hit the cache by complete-request hash. Each decision gets an evaluation contract frozen at issuance. |
 | **Memory without hidden state** | The Head receives earlier verdicts on the same stock from the ledger, with their entry and invalidation conditions and open blockers. Specialists never see them, so they judge the evidence fresh. |
 
+## Models per role (Anthropic + OpenAI)
+
+**System → Models** lets you pick a provider, model and effort for every role: Quant, News, Forensic, Head, Critic and Claims. Model lists load **live** from each provider's Models API (newest first) once its key is set (`ca secrets set OPENAI_API_KEY`). Choose *Custom model id…* for anything not listed.
+
+- Recommended: put the **Critic on a different provider than the Head**. The UI shows vendor separation as `separated`, `partial` or `degraded`, and every decision records it.
+- `discovery` (web search) and `research_qa` (Citations API) stay on Anthropic, because they rely on Anthropic-specific tools.
+- Your choices are saved to `data/settings/models_override.yaml` (git-ignored) and merged over `config/models.yaml`. The effective version gets a `+local-<hash>` suffix, so a run is always traceable to its exact models.
+- If a model has no price in config, its calls are recorded as **cost unknown**, never guessed, and the UI asks you to add the price.
+- Both providers go through the same validators, citation checks, bounded repair, caching and audit records. OpenAI uses the Responses API with strict structured outputs (`store=false`).
+
+## Analysis loops
+
+Choose 1–3 loops when starting a run (UI or `ca analyse TCS --loops 2`). Every extra loop:
+
+1. **Re-fetches all evidence:** prices, NSE data, news, captures and facts.
+2. **Searches for the previous loop's open questions:** unsettled Critic objections, each brain's missing evidence, and rules that came out `unknown`.
+3. **Builds a new bundle** that links to its parent, and **re-runs the brains blind**.
+4. **Gives the Head and Critic a `<previous_loop>` block.** They state what the new evidence settled or left open, and the Critic re-tests open objections instead of repeating settled ones.
+
+The run page has a **tab per loop** with its own progress tracker, plus a **"What changed across loops"** table: evidence, questions searched, decisions, objections, governance coverage and citation integrity. Only the final loop issues a verdict; earlier loops are stored as loop records, so retries never inflate the track record. Cost scales with loops, and the budget reservation is multiplied accordingly.
+
+## Best sources
+
+Each verdict shows a ranked **"Best sources for this decision"** list. You can show 5, 8 or 10 (default 8, set in `config/user.yaml → display.top_sources`). The score is *source tier × how often the panel relied on it (verified quotes count most) × recency*, and each entry explains its rank, e.g. "Official / exchange · cited 4× (3 verified) by forensic, head · 12 days old". Computed prices and technicals are excluded from the ranking. Every source remains in the Sources tab.
+
 ## Quick start (Windows / macOS / Linux, Python 3.11+)
 
 ```bash
@@ -80,14 +105,22 @@ Without it, Forensic coverage is low: the governance score is withheld and buys 
 
 ## Chrome extension (ET Prime capture)
 
-`browser/chrome-extension/` is a Manifest V3 side panel.
+`browser/chrome-extension/` is a Manifest V3 side panel, v0.3.0.
 
-1. `chrome://extensions` → Developer mode → **Load unpacked** → select `browser/chrome-extension`.
+**Set up once**
+1. `chrome://extensions` → Developer mode → **Load unpacked** → select `browser/chrome-extension`. After a `git pull`, click the extension's reload ↻ icon.
 2. In Personal CA → **System**, copy the pairing token. In the extension → **Settings**, paste it.
-3. On an ET article you can read: **Allow ET & capture**. This requests access to `economictimes.indiatimes.com` only, not all sites. Use **Capture selection** for noisy pages.
-4. Inspect the passages, check the article end and any tables, tick the personal-research attestation, then **Send to Personal CA**. You get a per-item receipt: accepted, duplicate, new version or rejected.
+3. Tick the personal-research attestation, then click **Allow ET access**. This grants `economictimes.indiatimes.com` only, not all sites.
 
-The extension reads rendered, visible text only. It does not read cookies, hidden JSON or paywalled content, and does not bypass any access control. Captures are kept in session storage. **Export JSON** with `ca import-captures` is the fallback.
+**Queue several ET articles: the main workflow**
+1. In Personal CA → **Research inbox → ET Prime article queue**, paste ET links, one per line. Optionally tag a stock, e.g. `TCS`. From the extension you can also use **Add this tab**, or open an ET listing or topic page and use **Scan page for articles** to tick links to queue.
+2. In the extension, click **Fetch queued articles**. Each link opens in a background tab of *your* signed-in Chrome. After it renders, the extension captures the text, closes the tab and sends it with the queue id. Pages load one at a time with pacing, and you can **Stop** at any point. It **stops at a login or challenge page** rather than trying to get past it.
+3. The server versions and deduplicates each article and links it to the tagged stock (or to companies it finds by name). If an API key is available, it also extracts **attributed claims with verification tasks** in the background.
+4. The next analysis of that stock joins the article as a news source (tier: user capture, unverified). Its passages can be quoted and verified like any other source.
+
+**Single article:** open it, then **Capture page** (or select text and **Capture selection**), inspect the passages, then **Send**.
+
+The extension reads rendered, visible text only. It does not read cookies, hidden JSON or paywalled content, and does not bypass any access control. There is no server-side login or scraping. Captures are kept in session storage. **Export JSON** with `ca import-captures` is the fallback. On a source page in the inbox you can also link it to a stock manually when name matching was ambiguous.
 
 ## Kite
 

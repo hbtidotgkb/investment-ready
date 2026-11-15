@@ -27,6 +27,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv(ROOT / ".env")
 
+PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+
 for _d in (DATA, RAW, REPORTS, INBOX_ET, MANUAL, SECRETS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -45,13 +47,50 @@ def _load_yaml(name: str) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
+SETTINGS_DIR = DATA / "settings"
+SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache(maxsize=None)
+def _load_override(name: str) -> dict[str, Any]:
+    p = SETTINGS_DIR / f"{name}_override.yaml"
+    if not p.exists():
+        return {}
+    with open(p, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
 def config(name: str) -> dict[str, Any]:
-    """Load config/<name>.yaml (cached; call reload_config() after edits)."""
-    return _load_yaml(name)
+    """Load config/<name>.yaml merged with personal overrides in data/settings/ (cached;
+    call reload_config() after edits). Overrides are versioned by content hash."""
+    base = _load_yaml(name)
+    ov = _load_override(name)
+    if not ov:
+        return base
+    merged = json.loads(json.dumps(base))
+    if name == "models":
+        for role, rc in (ov.get("roles") or {}).items():
+            merged["roles"].setdefault(role, {}).update(rc)
+        merged["pricing_usd_per_mtok"].update(ov.get("pricing_usd_per_mtok") or {})
+    else:
+        merged.update(ov)
+    merged["version"] = f"{base.get('version', 'unversioned')}+local-{canonical_hash(ov)[:8]}"
+    return merged
+
+
+def write_override(name: str, data: dict[str, Any]) -> None:
+    with open(SETTINGS_DIR / f"{name}_override.yaml", "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, sort_keys=True, allow_unicode=True)
+    reload_config()
+
+
+def read_override(name: str) -> dict[str, Any]:
+    return dict(_load_override(name))
 
 
 def reload_config() -> None:
     _load_yaml.cache_clear()
+    _load_override.cache_clear()
 
 
 def config_versions() -> dict[str, str]:

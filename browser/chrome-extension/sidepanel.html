@@ -12,22 +12,29 @@
   <span id="conn" class="pill">checking…</span>
 </header>
 
-<section class="actions">
-  <button id="allow-et" class="btn primary" title="Grant access to economictimes.indiatimes.com only, then capture">Allow ET &amp; capture</button>
-  <button id="cap-page" class="btn">Capture page</button>
-  <button id="cap-sel" class="btn">Capture selection</button>
-</section>
-<p class="hint">Captures only the text already rendered in this tab that you can read. No cookies, no paywall bypass. Check the end of each article and any tables against the page.</p>
+<label class="attest"><input type="checkbox" id="attest"> I use these captures for my own personal research, and I have legitimate access to them (e.g. my ET Prime subscription).</label>
+<button id="allow-et" class="btn wide" title="Grant access to economictimes.indiatimes.com only">Allow ET access</button>
 <div id="msg" class="msg" hidden></div>
 
-<section>
-  <div class="row"><h3>Session sources <span id="count" class="muted">0/10</span></h3><span class="spacer"></span><button id="clear" class="btn sm">Clear</button></div>
-  <input id="search" type="search" placeholder="Search captured passages…">
-  <div id="list"></div>
+<section class="box">
+  <div class="row"><h3>Article queue</h3><span class="spacer"></span><span id="qcount" class="pill">—</span></div>
+  <p class="hint">Links you queued on the Personal CA Research inbox page. Each opens in a background tab of <b>your</b> signed-in Chrome, is captured, closed and sent. Stops at login or challenge pages.</p>
+  <div class="row"><button id="q-fetch" class="btn primary">Fetch queued articles</button><button id="q-cancel" class="btn" hidden>Stop</button><button id="q-refresh" class="btn sm">↻</button></div>
+  <div id="qlist"></div>
+  <div class="row" style="margin-top:8px"><input id="q-sym" type="text" placeholder="Stock tag (optional)" style="width:140px;text-transform:uppercase"><button id="q-addtab" class="btn sm">Add this tab</button><button id="q-scan" class="btn sm">Scan page for articles</button></div>
+  <div id="scan"></div>
 </section>
 
-<section class="send">
-  <label class="attest"><input type="checkbox" id="attest"> I am using the selected captures for my own personal research, and I have legitimate access to them.</label>
+<section class="box">
+  <h3>Capture this page</h3>
+  <div class="actions"><button id="cap-page" class="btn">Capture page</button><button id="cap-sel" class="btn">Capture selection</button></div>
+  <p class="hint">Reads only the text rendered in this tab. No cookies, no paywall bypass. Check the article's end and any tables against the page.</p>
+</section>
+
+<section>
+  <div class="row"><h3>Session sources <span id="count" class="muted">0/20</span></h3><span class="spacer"></span><button id="clear" class="btn sm">Clear</button></div>
+  <input id="search" type="search" placeholder="Search captured passages…">
+  <div id="list"></div>
   <div class="row"><button id="send" class="btn primary">Send selected to Personal CA</button><button id="export" class="btn">Export JSON</button></div>
   <div id="receipt"></div>
 </section>

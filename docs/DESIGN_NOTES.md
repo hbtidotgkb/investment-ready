@@ -27,6 +27,15 @@ Build 0.2.0 · 15 November 2026. This file records how this build maps to
 | Outcome labelling, scorecards, golden-case evals (L2–L4), improvement loop | **Not yet** |
 | Lot-level tax, portfolio-wide planned-loss budget, stress view | **Not yet.** The budget is deliberately not invented (spec §9.6) |
 
+## Added in 0.3.0 (user requests, 15 Nov 2026)
+
+| Feature | How it maps to the spec |
+|---|---|
+| Per-role provider/model (Anthropic + OpenAI), live model lists, UI editor | Spec §12 "config-driven adapters". Vendor separation is now computed per decision, not a static flag. Gemini is not wired yet |
+| 1–3 analysis loops | Generalises the spec's single bounded evidence-repair pass (§10.6). Each loop is a full re-run with targeted discovery for open questions and a parent-linked bundle. Only the final loop issues a verdict. **Spec deviation:** the spec allows one repair pass; you chose up to three (`config/user.yaml → analysis.max_loops`) |
+| Best sources (5/8/10) | Display only. Ranking formula in `outputs.rank_sources`; nothing is dropped from the bundle |
+| ET article queue + "scan page" + manual stock linking + auto claim extraction | The spec's planned "guided exploration" (§7): user-selected pages, visible and sequential, cancellable, stops at access challenges, at most 20 pending. Capture still happens only in the user's own browser |
+
 ## Deliberate refinements (please confirm)
 
 1. **Rejecting an objection requires a verified quote.** If the Head rejects a Critic objection, code downgrades it to `unresolved` unless the rejection cites a passage whose quote is found verbatim. The spec says "a rhetorical reply is not a passed test"; this is the strict, code-checkable version.
@@ -39,7 +48,7 @@ Build 0.2.0 · 15 November 2026. This file records how this build maps to
 
 ## Concerns to discuss
 
-1. **Single vendor.** All roles run on Anthropic models (your choice for now). The spec's diversity argument, and especially Head–Critic vendor separation, is not met: the record says `vendor_separation: degraded`. Cheapest improvement: give the Critic a different vendor first. The gateway is the only file that would need a second provider adapter.
+1. **Vendor separation.** All roles default to Anthropic. Since 0.3.0 you can move any role, e.g. the Critic, to OpenAI from System → Models; the decision record shows `separated`, `partial` or `degraded`. OpenAI models are not hard-coded: the list comes live from your key. Fallbacks across providers are not automatic.
 2. **ET Prime rights.** The extension captures only what you can already read and records your personal-research attestation, but ET's terms on extraction, AI processing and retention remain unresolved (spec §7, §16). The attestation records your decision; it does not settle the legal question. Unattested captures are stored but never sent to a model.
 3. **Fundamentals are the weakest link.** Until XBRL ingestion exists, Forensic coverage depends on the manual facts file, and results found by web search are attributed claims, not verified facts. Expect `insufficient_data` / research-only outcomes for most live runs at first. That is the design working, not a bug.
 4. **Tax values are as of the July 2024 changes** (STCG 20%, LTCG 12.5% above ₹1.25 lakh, plus cess). Budgets since then may have changed them. Verify before marking the file verified.

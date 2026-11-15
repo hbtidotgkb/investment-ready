@@ -1,30 +1,44 @@
-# LLM gateway configuration. Switching a role's model is a config change only.
-# Spec §12 "LLM gateway". Every call logs role, prompt version, model, tokens, cost, latency.
-version: models@1
-provider: anthropic
+# LLM gateway configuration (spec §12). Switching a role's provider/model is a config change only.
+# Personal choices made in the UI (System → Models) are saved to data/settings/models_override.yaml
+# and merged over this file; the effective version string then carries a "+local-<hash>" suffix.
+version: models@2
 
-# The spec assigns Quant=Claude, News=Gemini, Forensic=ChatGPT and requires Head–Critic
-# vendor separation. This build is configured Anthropic-only (user decision, 15 Nov 2026),
-# so vendor diversity is DEGRADED. Every decision record carries this flag.
-vendor_separation: degraded
+# Spec defaults: Quant=Claude, News=Gemini, Forensic=ChatGPT, Head=Claude, Critic≠Head vendor.
+# Supported providers in this build: anthropic, openai. Vendor separation is COMPUTED from the
+# role assignments and recorded on every decision (Head and Critic on different providers = separated).
+providers:
+  anthropic: {label: "Anthropic (Claude)", key: ANTHROPIC_API_KEY}
+  openai:    {label: "OpenAI",             key: OPENAI_API_KEY}
 
-# USD per million tokens. Verify against https://www.anthropic.com/pricing before relying on cost caps.
+# Roles that rely on provider-specific tools stay on that provider.
+locked_roles:
+  discovery: anthropic     # Claude web search with allowed_domains + verbatim cited_text
+  research_qa: anthropic   # Citations API over custom-content documents
+
+# USD per million tokens. Verify against provider pricing pages; add any model you select.
+# Calls on a model with no price here are recorded with cost "unknown" and flagged in the UI.
 pricing_usd_per_mtok:
   claude-opus-5-5:   {input: 4.00, output: 20.00}
   claude-sonnet-5-5: {input: 2.00, output: 10.00}
   claude-haiku-5-5:  {input: 0.10, output: 0.50}
-  # Web search server tool: billed per search on top of tokens
+  claude-fable-5-2:  {input: 8.00, output: 40.00}
   web_search_per_1k: 10.00
 
+# Suggested models shown when a provider key is missing (live lists load from each provider's
+# Models API once its key is configured). OpenAI suggestions are deliberately not hard-coded.
+suggested_models:
+  anthropic: [claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-fable-5-2]
+  openai: []
+
 roles:
-  discovery:   {model: claude-opus-5-5, effort: low,    max_tokens: 16000, prompt: discovery@2.0.0}
-  quant:       {model: claude-opus-5-5, effort: high,   max_tokens: 16000, prompt: quant@2.0.0}
-  news:        {model: claude-opus-5-5, effort: high,   max_tokens: 16000, prompt: news@2.0.0}
-  forensic:    {model: claude-opus-5-5, effort: high,   max_tokens: 16000, prompt: forensic@2.0.0}
-  head:        {model: claude-opus-5-5, effort: high,   max_tokens: 16000, prompt: head@2.0.0}
-  critic:      {model: claude-opus-5-5, effort: high,   max_tokens: 16000, prompt: critic@2.0.0}
-  research_qa: {model: claude-opus-5-5, effort: low,    max_tokens: 8000,  prompt: research_qa@2.0.0}
-  claims:      {model: claude-opus-5-5, effort: low,    max_tokens: 8000,  prompt: claims@2.0.0}
+  discovery:   {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 16000, prompt: discovery@2.0.0}
+  quant:       {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: quant@2.0.0}
+  news:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: news@2.0.0}
+  forensic:    {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: forensic@2.0.0}
+  head:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: head@2.1.0}
+  critic:      {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: critic@2.1.0}
+  research_qa: {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: research_qa@2.0.0}
+  claims:      {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: claims@2.0.0}
 
 # Bounded validation repairs per spec §11 "Validation and retries"
 max_validation_repairs: 2

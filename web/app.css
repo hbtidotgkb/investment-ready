@@ -156,6 +156,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .st-icon.running { animation: none; } }
 
+/* loop tabs */
+.loop-tabs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.loop-tabs button { border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2); border-radius: 999px; padding: 5px 14px; font-weight: 600; }
+.loop-tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.loop-tabs button.completed:not(.on) { color: var(--good); border-color: var(--good); }
+.loop-tabs button.running:not(.on) { color: var(--accent); border-color: var(--accent); }
+
+/* top sources */
+.top-sources { margin: 6px 0 0; padding-left: 22px; display: grid; gap: 8px; }
+.top-sources li { padding-left: 4px; }
+
 /* verdict */
 .verdict { display: grid; grid-template-columns: 240px 1fr; gap: 20px; }
 @media (max-width: 760px) { .verdict { grid-template-columns: 1fr; } }

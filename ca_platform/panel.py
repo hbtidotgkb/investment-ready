@@ -161,24 +161,26 @@ async def run_brain(gw, role: str, b: Bundle, pre: list[dict], idx: CitationInde
     return res.parsed, ver, res.record
 
 
-def head_inputs(b, pre, prior, calcs, rblock, panel_view) -> str:
+def head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop: dict | None = None) -> str:
+    loop_txt = (f"<previous_loop>\n{json.dumps(prev_loop, indent=1, ensure_ascii=False)}\n</previous_loop>\n"
+                if prev_loop else "")
     return (f"{context_block(b, pre, prior)}\n<calculations>\n{json.dumps(calcs, indent=1, default=str)}\n</calculations>\n"
-            f"{rblock}\n{panel_view}\n")
+            f"{loop_txt}{rblock}\n{panel_view}\n")
 
 
-async def run_head_draft(gw, b, pre, prior, calcs, rblock, panel_view, idx, stage):
+async def run_head_draft(gw, b, pre, prior, calcs, rblock, panel_view, idx, stage, prev_loop=None):
     sys_p, ver = system_prompt("head")
-    user = head_inputs(b, pre, prior, calcs, rblock, panel_view) + (
+    user = head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop) + (
         f"\nWrite your DRAFT decision for the {b.horizon} horizon as the required JSON object.")
     res = await gw.structured(role="head", stage=stage, system=sys_p, user=user, output_model=HeadDecisionLLM,
                               semantic_check=head_checker(idx))
     return res.parsed, ver, res.record
 
 
-async def run_critic(gw, b, pre, calcs, rblock, panel_view, draft: HeadDecisionLLM, draft_audit, idx, stage):
+async def run_critic(gw, b, pre, calcs, rblock, panel_view, draft: HeadDecisionLLM, draft_audit, idx, stage, prev_loop=None):
     sys_p, ver = system_prompt("critic")
     dd = annotate_report(draft.model_dump(), idx)
-    user = (head_inputs(b, pre, [], calcs, rblock, panel_view)
+    user = (head_inputs(b, pre, [], calcs, rblock, panel_view, prev_loop)
             + f"<draft>\n{json.dumps(dd, indent=1, ensure_ascii=False)}\n</draft>\n"
             + f"<draft_citation_audit>\n{json.dumps({k: draft_audit[k] for k in ('counts', 'score', 'defects')}, indent=1)}\n</draft_citation_audit>\n"
             + "\nReview the draft and return your critique as the required JSON object.")
@@ -187,9 +189,9 @@ async def run_critic(gw, b, pre, calcs, rblock, panel_view, draft: HeadDecisionL
     return res.parsed, ver, res.record
 
 
-async def run_head_final(gw, b, pre, prior, calcs, rblock, panel_view, draft, critique: CritiqueLLM, idx, stage):
+async def run_head_final(gw, b, pre, prior, calcs, rblock, panel_view, draft, critique: CritiqueLLM, idx, stage, prev_loop=None):
     sys_p, ver = system_prompt("head")
-    user = (head_inputs(b, pre, prior, calcs, rblock, panel_view)
+    user = (head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop)
             + f"<draft>\n{draft.model_dump_json(indent=1)}\n</draft>\n"
             + f"<critique>\n{json.dumps(annotate_report(critique.model_dump(), idx), indent=1, ensure_ascii=False)}\n</critique>\n"
             + "\nRespond to every objection and give your FINAL decision as the required JSON object.")

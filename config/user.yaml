@@ -14,6 +14,17 @@ budget:
   monthly_llm_budget_usd: 25.0           # hard cap enforced in code (spec N6)
   per_run_reservation_usd: 1.50          # reserved before a panel starts; reconciled after
 
+analysis:
+  default_loops: 1                       # loops per run (UI lets you pick 1..max_loops)
+  max_loops: 3                           # each loop re-fetches all evidence; cost scales with loops
+
+display:
+  top_sources: 8                         # "best sources" shown on the verdict (5..10)
+
+inbox:
+  auto_extract_claims: true              # extract attributed claims after an attested capture arrives
+  queue_max_pending: 20                  # ET article queue (spec §7 future budget: 20 pages/session)
+
 service:
   host: 127.0.0.1                        # loopback only (spec N14)
   port: 8765

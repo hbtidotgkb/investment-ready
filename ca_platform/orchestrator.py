@@ -2,6 +2,13 @@
 
 Plain asyncio, no agent framework: every hand-off between stages is an explicit, typed,
 stored record. Progress for every stage and sub-step is emitted as events for the UI.
+
+Multi-loop runs: loop k+1 re-fetches ALL evidence, adds targeted discovery for the open
+questions loop k left behind (missing evidence, unsettled objections, unknown rules), builds a
+new bundle (parent = previous bundle), re-runs the brains blind, and gives the Head and Critic
+the previous loop's outcome as context. Only the final loop issues a verdict; earlier loops are
+stored as loop records (a retry never creates another independent recommendation, spec §12).
+
 Failure is role-aware (spec §12 failure table): partial research is preserved, but a
 missing required assessment can never produce a normal buy.
 """
@@ -16,24 +23,30 @@ from typing import Any
 
 from . import panel as P
 from .citations import CitationIndex, audit
-from .contracts import Bundle, Calculation
+from .contracts import Bundle, Calculation, HeadFinalLLM
 from .data import demo
 from .data import manual as manual_mod
 from .events import REGISTRY, RunEvents
 from .evidence import EvidenceFactory, from_discovery, pattern_passage, technical_passages
 from .features import patterns as patterns_mod
 from .features import technicals
-from .gateway import Budget, BudgetExceeded, Gateway, LLMUnavailable
+from .gateway import Budget, BudgetExceeded, Gateway, LLMUnavailable, missing_keys, vendor_separation
 from .ledger import dumps, get_ledger
 from .mock import MockGateway
-from .outputs import pick_concepts, save_report, whatsapp
+from .outputs import pick_concepts, rank_sources, save_report, whatsapp
 from .prompting import panel_bundle_view, system_prompt
 from .rules import engine as R
 from .settings import canonical_hash, config, config_versions, iso, now_ist
 
+PANEL_ROLES = ["quant", "news", "forensic", "head", "critic"]
+
 
 class RunFailed(RuntimeError):
     pass
+
+
+def max_loops() -> int:
+    return int((config("user").get("analysis") or {}).get("max_loops", 3))
 
 
 def prior_decisions(symbol: str, limit: int = 3) -> list[dict]:
@@ -51,24 +64,85 @@ def prior_decisions(symbol: str, limit: int = 3) -> list[dict]:
     return out
 
 
+def open_questions(rec: dict) -> list[str]:
+    """What the previous loop could not settle — becomes targeted discovery for the next loop."""
+    qs: list[str] = []
+    for row in (rec.get("resolution") or {}).get("rows", []):
+        if row["effective_result"] != "passed":
+            qs.append(f"{row['objection']['text']} (test: {row['objection']['settling_test']['description']})")
+    for role, rep in (rec.get("reports") or {}).items():
+        for m in rep.get("missing_evidence", []):
+            qs.append(f"{m} ({role})")
+    for r in rec.get("rule_results", []):
+        if r["result"] == "unknown" and r["rule"] not in ("benchmark",):
+            qs.append(f"{r['rule'].replace('_', ' ')}: {r['detail']}")
+    seen, out = set(), []
+    for q in qs:
+        k = q.lower()[:80]
+        if k not in seen:
+            seen.add(k)
+            out.append(q)
+    return out[:8]
+
+
+def previous_loop_block(rec: dict) -> dict:
+    return {"loop": rec["loop"], "final_decision": rec["head_proposal"]["decision"], "permitted_action": rec["final_action"]["decision"],
+            "head_summary": rec["head_proposal"]["summary"],
+            "objections": [{"id": r["objection"]["id"], "severity": r["objection"]["severity"], "text": r["objection"]["text"],
+                            "settling_test": r["objection"]["settling_test"]["description"], "effective_result": r["effective_result"]}
+                           for r in (rec.get("resolution") or {}).get("rows", [])],
+            "rule_blockers": [f"{r['rule']} ({r['result']}): {r['detail']}" for r in rec["rule_results"] if r["result"] in ("blocked", "unknown")],
+            "open_questions": rec.get("open_questions", [])}
+
+
 async def run_analysis(symbol: str, horizon: str = "medium", action: str = "new_purchase",
-                       mode: str = "live", run_id: str | None = None) -> dict:
+                       mode: str = "live", run_id: str | None = None, loops: int = 1) -> dict:
     led = get_ledger()
     run_id = run_id or f"run-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     ev = REGISTRY.get(run_id) or RunEvents(run_id, persist=led.add_event)
     REGISTRY[run_id] = ev
     symbol = (demo.DEMO_SYMBOL if mode == "demo" else symbol).upper().strip()
+    loops = max(1, min(int(loops or 1), max_loops()))
     decision_at = iso()
     led.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [run_id, symbol, mode, horizon, action, decision_at, None, "running", None, None, None, 0.0,
-                 json.dumps(config_versions()), None])
-    ev.emit("run_start", None, f"Analysing {symbol} ({horizon} horizon, {mode} mode)", "running",
-            {"symbol": symbol, "horizon": horizon, "action": action, "mode": mode, "decision_at": decision_at})
-    state: dict[str, Any] = {"run_id": run_id, "symbol": symbol, "mode": mode}
+                 json.dumps(config_versions() | {"loops": loops}), None])
+    ev.emit("run_start", None, f"Analysing {symbol} ({horizon} horizon, {mode} mode, {loops} loop{'s' if loops > 1 else ''})",
+            "running", {"symbol": symbol, "horizon": horizon, "action": action, "mode": mode, "decision_at": decision_at,
+                        "loops": loops})
     try:
-        result = await _pipeline(ev, led, state, symbol, horizon, action, mode, decision_at)
-        ev.emit("run_end", None, "Run complete", "completed", {"verdict_id": result.get("verdict_id")})
-        return result
+        gw = None
+        if mode == "live":
+            miss = missing_keys(PANEL_ROLES)
+            if miss:
+                raise RunFailed(f"Missing API key(s) for the configured panel: {', '.join(miss)}. "
+                                f"Store with `ca secrets set <NAME>` or change models in System → Models, or run DEMO mode.")
+            budget = Budget(led)
+            reserve = float(config("user")["budget"]["per_run_reservation_usd"]) * loops
+            budget.reserve(reserve)
+            gw = Gateway(led, run_id, log=ev.log)
+        carry: dict | None = None
+        records: list[dict] = []
+        total_cost, unknown_calls = 0.0, 0
+        for k in range(1, loops + 1):
+            ev.loop = k
+            ev.emit("loop_start", None, f"Loop {k} of {loops}" + (" — re-fetching all evidence with the previous loop's open questions"
+                                                                    if carry else ""), "running",
+                    {"loop": k, "open_questions": (carry or {}).get("open_questions", [])})
+            rec, _ = await _loop(ev, led, run_id, symbol, horizon, action, mode, decision_at, k, loops, carry, gw)
+            total_cost += rec["cost_usd"]                 # per-loop deltas (the live gateway is shared)
+            unknown_calls += rec["calls_with_unknown_price"]
+            records.append(rec)
+            ev.emit("loop_end", None, f"Loop {k}: {rec['final_action']['decision'].upper()}", "completed",
+                    {"loop": k, "summary": loop_summary(rec)})
+            carry = rec
+        final = records[-1]
+        final["loops"] = [loop_summary(r) for r in records]
+        final["cost_usd"] = round(total_cost, 4)
+        final["calls_with_unknown_price"] = unknown_calls
+        _issue(led, run_id, final)
+        ev.emit("run_end", None, "Run complete", "completed", {"verdict_id": final["verdict_id"], "loops": loops})
+        return {"run_id": run_id, "status": "completed", "verdict_id": final["verdict_id"], "decision_record": final}
     except Exception as e:  # never render a partial run as a completed verdict
         msg = str(e) if isinstance(e, (RunFailed, BudgetExceeded, LLMUnavailable)) else f"{type(e).__name__}: {e}"
         led.execute("UPDATE runs SET status=?, finished_at=?, summary=? WHERE run_id=?", ["failed", iso(), msg, run_id])
@@ -76,25 +150,55 @@ async def run_analysis(symbol: str, horizon: str = "medium", action: str = "new_
         return {"run_id": run_id, "status": "failed", "error": msg}
 
 
-async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, decision_at) -> dict:
+def loop_summary(rec: dict) -> dict:
+    rep_scores = {r: a["score"] for r, a in (rec.get("audits") or {}).items()}
+    return {"loop": rec["loop"], "bundle_id": rec["bundle_id"], "parent_bundle_id": rec.get("parent_bundle_id"),
+            "evidence_count": rec["evidence_count"], "new_evidence": rec.get("new_evidence", 0),
+            "draft_decision": (rec.get("head_draft") or {}).get("decision"), "head_decision": rec["head_proposal"]["decision"],
+            "permitted": rec["final_action"]["decision"], "actionable": rec["final_action"]["actionable"],
+            "objections": len((rec.get("critique") or {}).get("objections", [])),
+            "open_blockers": (rec.get("resolution") or {}).get("open_blockers", []),
+            "rule_blockers": [r["rule"] for r in rec["rule_results"] if r["result"] in ("blocked", "unknown")],
+            "governance": rec["governance"]["score"], "governance_coverage": rec["governance"]["coverage"],
+            "citation_scores": rep_scores, "open_questions": rec.get("open_questions", []),
+            "asked": rec.get("asked_questions", []), "summary": rec["head_proposal"]["summary"]}
+
+
+def _issue(led, run_id: str, dr: dict) -> None:
+    fa = dr["final_action"]
+    dr["learn"] = pick_concepts(dr)
+    dr["whatsapp"] = whatsapp(dr)
+    bundle = json.loads(led.fetchone("SELECT body FROM bundles WHERE bundle_id=?", [dr["bundle_id"]])["body"])
+    dr["report_path"] = save_report(dr, bundle)
+    led.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?,?,?)",
+                [dr["verdict_id"], run_id, dr["symbol"], dr["horizon"], fa["decision"], fa["actionable"], dr["issued_at"], dumps(dr)])
+    complete = not dr["failed_roles"] and dr.get("critique") is not None
+    led.execute("UPDATE runs SET status=?, finished_at=?, final_decision=?, actionable=?, cost_usd=?, summary=? WHERE run_id=?",
+                ["completed" if complete else "partial", iso(), fa["decision"], fa["actionable"], dr["cost_usd"],
+                 dr["head_proposal"].get("summary"), run_id])
+
+
+async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decision_at, loop, loops, carry, gw_live):
     fac = EvidenceFactory()
     flags: list[str] = []
     today = date.fromisoformat(decision_at[:10])
+    asked = carry.get("open_questions", []) if carry else []
+    targeted = ("\nAlso look specifically for evidence on these open questions from the previous analysis loop:\n- "
+                + "\n- ".join(asked)) if asked else ""
 
     # ------------------------------------------------------------ context ---
-    ev.start("context", "Establishing decision timestamp, horizon, mode and portfolio context")
+    ev.start("context", f"Loop {loop}/{loops}: decision timestamp, horizon, mode and portfolio context")
     ev.log("context", f"Decision timestamp {decision_at} (Asia/Kolkata)")
     hz = config("horizons")["horizons"][horizon]
     ev.log("context", f"Horizon '{horizon}': {hz['label']} ({hz['trading_days']} trading days)")
+    vs = vendor_separation()
+    ev.log("context", "Panel models: " + ", ".join(f"{r}={vs['providers'][r]}:{vs['models'][r]}" for r in vs["providers"])
+           + f" · vendor separation {vs['status']}")
+    if asked:
+        ev.log("context", f"Carrying {len(asked)} open question(s) from loop {loop - 1} into targeted discovery")
     if mode == "live":
-        gw: Any = Gateway(led, state["run_id"], log=ev.log)
-        if not gw.available:
-            raise RunFailed("ANTHROPIC_API_KEY not configured. Store it with `ca secrets set ANTHROPIC_API_KEY` or run DEMO mode.")
-        budget = Budget(led)
-        reserve = float(config("user")["budget"]["per_run_reservation_usd"])
-        budget.reserve(reserve)
-        bs = budget.status()
-        ev.log("context", f"Budget: ${bs['spent_usd']:.2f} spent of ${bs['cap_usd']:.2f} this month; reserved ${reserve:.2f} for this run")
+        bs = Budget(led).status()
+        ev.log("context", f"Budget: ${bs['spent_usd']:.2f} spent of ${bs['cap_usd']:.2f} this month")
     from .data import kite as kite_mod
     ks = kite_mod.status() if mode == "live" else {"state": "demo", "message": "Kite not used in DEMO"}
     ev.log("context", f"Kite: {ks['message']}")
@@ -113,11 +217,11 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
         from .data import nse
         m = nse.lookup(symbol)
         if not m:
-            ev.log("context", "Symbol not found in cached NSE equity master — will try exchange quote")
+            ev.log("context", "Symbol not found in cached NSE equity master (run `ca equity-master`)")
         company, sector, isin = (m["name"] if m else symbol), None, (m["isin"] if m else None)
     ev.log("context", f"Company: {company}")
     ev.end("context", "completed", f"{company} · {hz['label']} · portfolio context {pf_status}",
-           {"company": company, "portfolio_context_status": pf_status, "kite": ks["state"]})
+           {"company": company, "portfolio_context_status": pf_status, "kite": ks["state"], "vendor_separation": vs})
 
     # ------------------------------------------------------------- prices ---
     ev.start("prices", "Loading daily candles")
@@ -161,12 +265,12 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
     if len(candles) >= 30:
         feats = technicals.compute(candles)
         pats = patterns_mod.detect(candles)
+        tp = technical_passages(feats, src)
         ev.log("features", f"SMA/RSI/MACD/ATR/52w computed ({technicals.CODE_VERSION}); {len(pats)} chart pattern(s) ({patterns_mod.CODE_VERSION})")
         fac.add(kind="computed_feature", title="Price & technicals (computed)", publisher="ca_platform features", tier=tier_c,
-                passages=technical_passages(feats, src), retrieved_via="features",
-                notes=f"Computed by {technicals.CODE_VERSION} from the price series above.")
+                passages=tp, retrieved_via="features", notes=f"Computed by {technicals.CODE_VERSION} from the price series above.")
         fac.add(kind="computed_feature", title="Price reaction summary (computed)", publisher="ca_platform features", tier=tier_c,
-                passages=[technical_passages(feats, src)[0], technical_passages(feats, src)[7]], retrieved_via="features")
+                passages=[tp[0], tp[7]], retrieved_via="features")
         if pats:
             fac.add(kind="chart_pattern", title="Chart patterns (computed)", publisher="ca_platform patterns", tier=tier_c,
                     passages=[pattern_passage(p) for p in pats], retrieved_via="features")
@@ -178,7 +282,7 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                                      inputs=["price_series"], result=feats.get(name), unit=unit,
                                      status="available" if feats.get(name) is not None else "missing"))
         ev.end("features", "completed", f"Close {feats['close']:,.2f} · RSI {feats['rsi14'] or 0:.1f} · {len(pats)} pattern(s)",
-               {"close": feats["close"], "patterns": [{k: p[k] for k in ("name", "status")} for p in pats]})
+               {"close": feats["close"], "patterns": [{k2: p[k2] for k2 in ("name", "status")} for p in pats]})
     else:
         ev.end("features", "degraded", "Not enough bars for features")
 
@@ -187,7 +291,7 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
     facts = []
     surveillance: dict = {"status": "unknown"}
     if mode == "demo":
-        doc = demo.manual_doc(today)
+        doc = demo.manual_doc(today, loop=loop)
         facts, mflags, surveillance = manual_mod.to_evidence(doc, fac, decision_at)
         flags += mflags
         fac.add(kind="company_profile", title="DEMO company profile (synthetic)", publisher="Demo Exchange", tier="DEMO_synthetic",
@@ -196,30 +300,12 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
         fac.add(kind="exchange_announcement", title=n["title"], publisher=n["publisher"], tier="DEMO_synthetic",
                 passages=[n["text"]], published_at=n["published_at"], retrieved_via="filings")
         ev.log("filings", f"DEMO facts: {len(facts)} typed facts, 1 exchange announcement, surveillance {surveillance['status']}")
+        if loop > 1:
+            ev.log("filings", "DEMO targeted discovery: found receivable-days and contingent-liability notes for open forensic questions")
     else:
         from .data import nse
         s = nse.NSESession()
         try:
-            q = await asyncio.to_thread(s.quote, symbol)
-            if q:
-                info, meta = q.get("info", {}), q.get("metadata", {})
-                ind = q.get("industryInfo", {})
-                company = info.get("companyName") or company
-                sector = ind.get("sector") or meta.get("industry") or sector
-                isin = info.get("isin") or isin
-                sec = q.get("securityInfo", {}) or {}
-                surv = sec.get("surveillance") or {}
-                stage_txt = surv.get("surv") if isinstance(surv, dict) else None
-                pe = fac.add(kind="company_profile", title=f"NSE quote metadata — {symbol}", publisher="NSE", tier="T1_official",
-                             url=f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}",
-                             passages=[f"{company} (ISIN {isin}); sector {sector}; industry {ind.get('basicIndustry') or meta.get('industry')}.",
-                                       f"NSE surveillance indicator: {stage_txt or 'none shown'}."],
-                             retrieved_via="filings")
-                surveillance = ({"status": "listed", "stage": stage_txt, "source": "NSE quote", "refs": [pe.id]} if stage_txt and stage_txt not in ("-", "")
-                                else {"status": "not_listed", "source": "NSE quote surveillance indicator", "refs": [pe.id]})
-                ev.log("filings", f"NSE quote: sector {sector}; surveillance {surveillance['status']}")
-            else:
-                ev.log("filings", "NSE quote metadata refused by NSE — not retried (no access-control workarounds)")
             sv = await asyncio.to_thread(s.surveillance, symbol)
             if sv is not None:
                 c = sv["counts"]
@@ -232,7 +318,7 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                 surveillance = {"status": sv["status"], "stage": sv["detail"], "source": f"NSE ASM/GSM lists ({sv['as_of']})",
                                 "refs": [se.id]}
                 ev.log("filings", f"Surveillance (NSE ASM/GSM lists): {sv['status']}")
-            elif surveillance["status"] == "unknown":
+            else:
                 ev.log("filings", "NSE ASM/GSM lists unavailable — surveillance status unknown")
             anns = await asyncio.to_thread(s.announcements, symbol)
             if anns:
@@ -258,33 +344,35 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
             ev.log("filings", f"Manual facts file: {len(facts)} typed facts ({sum(f.verified for f in facts)} user-verified from T1)")
         else:
             ev.log("filings", f"No data/manual/{symbol}.yaml — financial facts missing (Forensic will report coverage gaps)")
-        if gw.available:
+        if gw_live.available:
             try:
                 sys_p, _ = system_prompt("discovery")
-                out = await gw.web_discovery(
+                out = await gw_live.web_discovery(
                     role="discovery", stage="filings", system=sys_p,
                     allowed_domains=config("sources")["filings_search_domains"],
                     user=(f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find the latest quarterly and annual "
                           f"results (revenue, net profit attributable to owners, exceptional items, operating cash flow), auditor "
                           f"opinion or auditor changes, promoter pledge and shareholding changes, and any regulatory actions. "
-                          f"Only information published on or before {decision_at[:10]}."), max_uses=4)
+                          f"Only information published on or before {decision_at[:10]}." + targeted), max_uses=4)
                 made = from_discovery(fac, out, "filings", decision_at)
                 ev.log("filings", f"Filings discovery: {len(made)} sources with verbatim cited passages")
             except Exception as e:
                 ev.log("filings", f"Filings discovery failed ({type(e).__name__}: {str(e)[:120]})")
+        else:
+            ev.log("filings", "Filings discovery skipped — needs ANTHROPIC_API_KEY (web search)")
     ev.end("filings", "completed", f"{len(facts)} facts · surveillance {surveillance['status']}",
            {"facts": len(facts), "surveillance": surveillance["status"]})
 
     # --------------------------------------------------------------- news ---
     ev.start("news", "Discovering news from tiered, allow-listed publishers")
     if mode == "demo":
-        for n in demo.news_items(today):
+        for n in demo.news_items(today, loop=loop):
             if n["publisher"] == "Demo Exchange":
                 continue
             fac.add(kind="news_article", title=n["title"], publisher=n["publisher"], tier="DEMO_synthetic", passages=[n["text"]],
-                    published_at=n["published_at"], retrieved_via="news")
-        ev.log("news", "DEMO: 2 synthetic press items")
-        ev.end("news", "completed", "2 items (DEMO)")
+                    published_at=n["published_at"], retrieved_via=n.get("via", "news"))
+        ev.log("news", "DEMO: synthetic press items" + (" (+1 found by targeted discovery)" if loop > 1 else ""))
+        ev.end("news", "completed", f"{3 if loop > 1 else 2} items (DEMO)")
     else:
         from .data import news as news_mod
         items, nlog = await asyncio.to_thread(news_mod.search_headlines, company, symbol)
@@ -296,18 +384,19 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
             fac.add(kind="news_article", title=it["title"], publisher=it["publisher"], tier=it["tier"], url=it["url"],
                     passages=[f"Headline: {it['title']}"], published_at=it["published_at"], retrieved_via="news:rss",
                     notes=f"Headline only via {it['feed']}; body not retrieved.")
-        try:
-            sys_p, _ = system_prompt("discovery")
-            out = await gw.web_discovery(
-                role="discovery", stage="news", system=sys_p, allowed_domains=config("sources")["news_search_domains"],
-                user=(f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find material news and exchange "
-                      f"announcements from the last 90 days: results, orders, guidance, management changes, regulatory or legal "
-                      f"matters, block deals, rating changes, and broker views. Only items published on or before {decision_at[:10]}."),
-                max_uses=5)
-            made = from_discovery(fac, out, "news", decision_at)
-            ev.log("news", f"Search discovery: {len(made)} sources with verbatim cited passages")
-        except Exception as e:
-            ev.log("news", f"Search discovery failed ({type(e).__name__}: {str(e)[:120]})")
+        if gw_live.available:
+            try:
+                sys_p, _ = system_prompt("discovery")
+                out = await gw_live.web_discovery(
+                    role="discovery", stage="news", system=sys_p, allowed_domains=config("sources")["news_search_domains"],
+                    user=(f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find material news and exchange "
+                          f"announcements from the last 90 days: results, orders, guidance, management changes, regulatory or legal "
+                          f"matters, block deals, rating changes, and broker views. Only items published on or before {decision_at[:10]}."
+                          + targeted), max_uses=5)
+                made = from_discovery(fac, out, "news", decision_at)
+                ev.log("news", f"Search discovery: {len(made)} sources with verbatim cited passages")
+            except Exception as e:
+                ev.log("news", f"Search discovery failed ({type(e).__name__}: {str(e)[:120]})")
         tiers: dict[str, int] = {}
         for e in fac.items:
             if e.retrieved_via.startswith(("news", "discovery:news")):
@@ -316,7 +405,7 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                {"by_tier": tiers})
 
     # -------------------------------------------------------------- inbox ---
-    ev.start("inbox", "Joining eligible browser captures from the research inbox")
+    ev.start("inbox", "Joining eligible browser captures (ET Prime etc.) from the research inbox")
     n_caps = 0
     if mode == "demo":
         c = demo.capture(today)
@@ -325,11 +414,13 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                 notes="; ".join(c["warnings"]))
         n_caps = 1
     else:
-        rows = led.fetchall("SELECT * FROM research_sources WHERE first_seen_at <= ? ORDER BY ingested_at DESC", [decision_at])
+        rows = led.fetchall("SELECT * FROM research_sources WHERE first_seen_at <= ? ORDER BY version DESC", [decision_at])
         seen = set()
         for r in rows:
+            if r["source_id"] in seen:
+                continue
             links = json.loads(r["company_links"] or "{}")
-            if symbol not in [x["symbol"] for x in links.get("resolved", [])] or r["source_id"] in seen:
+            if symbol not in [x["symbol"] for x in links.get("resolved", [])]:
                 continue
             seen.add(r["source_id"])  # latest version only
             if r["usage_status"] != "personal_research_user_attested":
@@ -340,6 +431,7 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                     url=r["canonical_url"], passages=[p["text"] for p in ps], published_at=r["published_at"],
                     first_seen_at=r["first_seen_at"], access_status=r["access_status"], retrieved_via="inbox",
                     notes=f"Capture {r['source_id']} v{r['version']}; warnings: {', '.join(json.loads(r['warnings'] or '[]')) or 'none'}")
+            ev.log("inbox", f"Joined capture: {r['title'][:80]} ({len(ps)} passages)")
             n_caps += 1
     ev.end("inbox", "completed", f"{n_caps} capture(s) linked to {symbol}", {"captures": n_caps})
 
@@ -360,8 +452,9 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
         flags.append("Financial facts missing — valuation and forensic coverage limited")
     b = Bundle(mode=mode, symbol=symbol, company_name=company, sector=sector, isin=isin, decision_at=decision_at,
                horizon=horizon, action=action, portfolio_context_status=pf_status,
+               parent_bundle_id=carry["bundle_id"] if carry else None,
                price={"close": feats.get("close"), "date": feats.get("last_date"), "source": src},
-               candles=[{k: c[k] for k in ("date", "open", "high", "low", "close", "volume")} for c in candles[-260:]],
+               candles=[{k2: c[k2] for k2 in ("date", "open", "high", "low", "close", "volume")} for c in candles[-260:]],
                calculations=calcs, patterns=pats, facts=facts, evidence=fac.items, surveillance=surveillance,
                holdings_position=holdings_position, quality_flags=flags, coverage=coverage,
                versions=config_versions() | {"features": technicals.CODE_VERSION, "patterns": patterns_mod.CODE_VERSION})
@@ -370,7 +463,13 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
                         "sma200": feats["series"]["sma200"][-260:]})
     b.bundle_id = canonical_hash(b.model_dump(exclude={"bundle_id"}))
     led.execute("INSERT OR REPLACE INTO bundles VALUES (?,?,?,?)", [b.bundle_id, symbol, decision_at, b.model_dump_json()])
-    led.execute("UPDATE runs SET bundle_id=? WHERE run_id=?", [b.bundle_id, state["run_id"]])
+    led.execute("UPDATE runs SET bundle_id=? WHERE run_id=?", [b.bundle_id, run_id])
+    new_ev = 0
+    if carry:
+        prev = json.loads(led.fetchone("SELECT body FROM bundles WHERE bundle_id=?", [carry["bundle_id"]])["body"])
+        prev_hashes = {e["content_hash"] for e in prev["evidence"]}
+        new_ev = sum(e.content_hash not in prev_hashes for e in b.evidence)
+        ev.log("bundle", f"Versus loop {loop - 1}: {new_ev} new or changed evidence item(s); parent bundle {carry['bundle_id'][:12]}…")
     idx = CitationIndex(b)
     pre = R.preflight(b)
     nb = sum(r["result"] == R.BLOCKED for r in pre)
@@ -378,10 +477,11 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
     ev.log("bundle", f"{len(b.evidence)} evidence items, {sum(len(e.passages) for e in b.evidence)} passages; hash {b.bundle_id[:12]}…")
     ev.log("bundle", f"Preflight rules: {nb} blocked, {nu} unknown, {len(pre) - nb - nu} pass")
     ev.end("bundle", "completed", f"Bundle {b.bundle_id[:12]} · {len(b.evidence)} sources · preflight {nb} blocked / {nu} unknown",
-           {"bundle_id": b.bundle_id, "evidence": len(b.evidence), "preflight": pre, "coverage": coverage,
-            "quality_flags": flags})
-    if mode == "demo":
-        gw = MockGateway(led, state["run_id"], b, log=ev.log)
+           {"bundle_id": b.bundle_id, "evidence": len(b.evidence), "new_evidence": new_ev, "preflight": pre,
+            "coverage": coverage, "quality_flags": flags})
+    gw: Any = MockGateway(led, run_id, b, log=ev.log, loop=loop) if mode == "demo" else gw_live
+    cost_before = getattr(gw, "total_cost", 0.0)
+    unknown_before = getattr(gw, "unknown_cost_calls", 0)
 
     # ------------------------------------------------------------- brains ---
     roles = [("quant", "quant"), ("news", "news_brain"), ("forensic", "forensic")]
@@ -395,15 +495,17 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
             ev.log(stg, f"Citations: {au['counts']['verified']} verified, {au['counts']['id_only']} id-only, "
                    f"{au['total'] - au['counts']['verified'] - au['counts']['id_only']} defective · score {au['score']:.0%}")
             led.execute("INSERT INTO brain_reports VALUES (?,?,?,?,?,?,?,?)",
-                        [state["run_id"], role, None, rec.get("served_model", rec.get("model")), ver, True, au["score"], rep.model_dump_json()])
+                        [run_id, role, None, f"{rec.get('provider', 'anthropic')}:{rec.get('served_model', rec.get('model'))}",
+                         ver, True, au["score"], rep.model_dump_json()])
             ev.end(stg, "completed", rep.headline, {"conclusion": rep.specialist_conclusion, "citation_score": au["score"],
                                                     "report": P.annotate_report(rep.model_dump(), idx), "audit": au,
-                                                    "model": rec.get("served_model"), "prompt_version": ver,
-                                                    "cost_usd": rec.get("cost_usd", 0), "cache_hit": rec.get("cache_hit")})
+                                                    "model": f"{rec.get('provider', 'anthropic')}:{rec.get('served_model')}",
+                                                    "prompt_version": ver, "cost_usd": rec.get("cost_usd", 0),
+                                                    "price_known": rec.get("price_known", True), "cache_hit": rec.get("cache_hit")})
             return role, rep, au
         except Exception as e:
             led.execute("INSERT INTO brain_reports VALUES (?,?,?,?,?,?,?,?)",
-                        [state["run_id"], role, None, None, None, False, 0.0, json.dumps({"error": str(e)})])
+                        [run_id, role, None, None, None, False, 0.0, json.dumps({"error": str(e)})])
             ev.end(stg, "failed", f"{type(e).__name__}: {str(e)[:300]}")
             return role, None, None
 
@@ -419,11 +521,13 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
     for r, lbl in sorted(labels.items(), key=lambda x: x[1]):
         ev.log("anonymise", f"Analyst {lbl} = {P.REMIT[r].split(' — ')[0]} (mapping stored in ledger only)")
     for r, lbl in labels.items():
-        led.execute("UPDATE brain_reports SET label=? WHERE run_id=? AND role=?", [lbl, state["run_id"], r])
+        led.execute("UPDATE brain_reports SET label=? WHERE run_id=? AND role=? AND label IS NULL", [lbl, run_id, r])
     ev.end("anonymise", "completed", f"{len(labels)} report(s) labelled", {"labels": {v: P.REMIT[k].split(' — ')[0] for k, v in labels.items()}})
 
     head_draft = critique = final = None
+    dau = None
     resolution = {"rows": [], "open_blockers": [], "open_major": []}
+    prev_block = previous_loop_block(carry) if carry else None
     if len(reports) < 2:
         for s in ("head_draft", "critic", "resolution"):
             ev.start(s)
@@ -437,29 +541,33 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
         ev.start("head_draft", "Head CA weighs the anonymised reports")
         if prior:
             ev.log("head_draft", f"Memory: {len(prior)} prior verdict(s) on {symbol} from the ledger supplied as context")
+        if prev_block:
+            ev.log("head_draft", f"Loop memory: loop {loop - 1} ended {prev_block['permitted_action'].upper()} with "
+                   f"{len(prev_block['objections'])} objection(s) and {len(prev_block['open_questions'])} open question(s)")
         if failed_roles:
             ev.log("head_draft", f"Missing report(s): {', '.join(failed_roles)} — a buy cannot be actionable")
         try:
-            head_draft, hver, hrec = await P.run_head_draft(gw, b, pre, prior, calc_view, rblock, pview, idx, "head_draft")
+            head_draft, hver, hrec = await P.run_head_draft(gw, b, pre, prior, calc_view, rblock, pview, idx, "head_draft", prev_block)
             dau = audit(head_draft, idx)
             ev.end("head_draft", "completed", f"Draft: {head_draft.decision.upper()} — {head_draft.summary}",
                    {"draft": P.annotate_report(head_draft.model_dump(), idx), "audit": dau, "calculations": calc_view,
-                    "cost_usd": hrec.get("cost_usd", 0)})
+                    "cost_usd": hrec.get("cost_usd", 0), "model": f"{hrec.get('provider', 'anthropic')}:{hrec.get('served_model')}"})
         except Exception as e:
             ev.end("head_draft", "failed", f"{type(e).__name__}: {str(e)[:300]}")
 
         if head_draft is not None:
             ev.start("critic", "Critic CA reviews the draft against the checklist")
             try:
-                critique, cver, crec = await P.run_critic(gw, b, pre, calc_view, rblock, pview, head_draft, dau, idx, "critic")
-                sev = {}
+                critique, cver, crec = await P.run_critic(gw, b, pre, calc_view, rblock, pview, head_draft, dau, idx, "critic", prev_block)
+                sev: dict[str, int] = {}
                 for o in critique.objections:
                     sev[o.severity] = sev.get(o.severity, 0) + 1
                     ev.log("critic", f"{o.id} [{o.severity}/{o.type}] {o.text[:140]}")
-                led.execute("INSERT INTO critiques VALUES (?, ?)", [state["run_id"], critique.model_dump_json()])
+                led.execute("INSERT INTO critiques VALUES (?, ?)", [run_id, critique.model_dump_json()])
                 ev.end("critic", "completed", f"{len(critique.objections)} objection(s)" +
                        (" — " + ", ".join(f"{v} {k}" for k, v in sev.items()) if sev else " — draft judged sound"),
-                       {"critique": P.annotate_report(critique.model_dump(), idx), "cost_usd": crec.get("cost_usd", 0)})
+                       {"critique": P.annotate_report(critique.model_dump(), idx), "cost_usd": crec.get("cost_usd", 0),
+                        "model": f"{crec.get('provider', 'anthropic')}:{crec.get('served_model')}"})
             except Exception as e:
                 ev.end("critic", "failed", f"{type(e).__name__}: {str(e)[:300]} — draft stays unreviewed (research only)")
 
@@ -467,9 +575,9 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
             if critique is not None:
                 try:
                     if critique.objections:
-                        final, fver, frec = await P.run_head_final(gw, b, pre, prior, calc_view, rblock, pview, head_draft, critique, idx, "resolution")
+                        final, fver, frec = await P.run_head_final(gw, b, pre, prior, calc_view, rblock, pview, head_draft,
+                                                                   critique, idx, "resolution", prev_block)
                     else:
-                        from .contracts import HeadFinalLLM
                         final = HeadFinalLLM(responses=[], final=head_draft)
                         ev.log("resolution", "No objections — draft becomes the final proposal without another model call")
                     resolution = P.resolve(critique, final, idx)
@@ -514,38 +622,43 @@ async def _pipeline(ev: RunEvents, led, state, symbol, horizon, action, mode, de
     ev.end("consistency", "completed" if cons["result"] == "passed" else "failed", f"Consistency {cons['result']}", cons)
 
     # ------------------------------------------------------------ outputs ---
-    ev.start("outputs", "Writing the decision record, report and WhatsApp text")
+    last = loop == loops
+    ev.start("outputs", "Writing the decision record, report and WhatsApp text" if last else f"Storing loop {loop} record")
     fa = enf["final_action"]
     if cons["result"] != "passed":
         fa = dict(fa, actionable=False)
-    verdict_id = f"verdict-{uuid.uuid4().hex[:10]}"
     roles_models = {r["role"]: r for r in led.fetchall(
-        "SELECT role, label, model, prompt_version, citation_score FROM brain_reports WHERE run_id=?", [state["run_id"]])}
+        "SELECT role, label, model, prompt_version, citation_score FROM brain_reports WHERE run_id=? ORDER BY rowid", [run_id])}
     dr = {
-        "schema_version": "decision-record@2.0", "verdict_id": verdict_id, "run_id": state["run_id"], "symbol": symbol,
-        "company_name": company, "mode": mode, "horizon": horizon, "action": action, "decision_at": decision_at,
-        "issued_at": iso(), "bundle_id": b.bundle_id, "price_at_decision": b.price.get("close"),
+        "schema_version": "decision-record@2.1", "verdict_id": f"verdict-{uuid.uuid4().hex[:10]}", "run_id": run_id,
+        "loop": loop, "loops_total": loops, "symbol": symbol, "company_name": company, "mode": mode, "horizon": horizon,
+        "action": action, "decision_at": decision_at, "issued_at": iso(), "bundle_id": b.bundle_id,
+        "parent_bundle_id": b.parent_bundle_id, "evidence_count": len(b.evidence), "new_evidence": new_ev,
+        "price_at_decision": b.price.get("close"), "reports": reports, "audits": audits,
         "head_draft": head_draft.model_dump() if head_draft else None, "head_proposal": head_dict,
         "critique": critique.model_dump() if critique else None, "resolution": resolution,
         "rule_results": enf["rule_results"], "adjustments": enf["adjustments"], "governance": enf["governance"],
         "calculations": enf["calculations"], "final_action": fa, "consistency_check": cons,
         "failed_roles": failed_roles, "labels": labels, "brains": roles_models,
-        "vendor_separation": config("models").get("vendor_separation"),
+        "vendor_separation": vendor_separation(),
         "fallback_events": getattr(gw, "fallback_events", []),
-        "evaluation_contract": {"id": f"eval-{verdict_id}", "horizon": horizon, **config("horizons")["evaluation"],
+        "asked_questions": asked,
+        "evaluation_contract": {"id": None, "horizon": horizon, **config("horizons")["evaluation"],
                                 "benchmark_assumption": config("rules")["benchmark"], "frozen_at": iso()},
-        "versions": b.versions | {"prompts": {r: config("models")["roles"][r]["prompt"] for r in ("quant", "news", "forensic", "head", "critic")}},
-        "cost_usd": round(getattr(gw, "total_cost", 0.0), 4),
+        "versions": b.versions | {"prompts": {r: config("models")["roles"][r]["prompt"] for r in PANEL_ROLES},
+                                  "role_models": {r: f"{config('models')['roles'][r].get('provider', 'anthropic')}:"
+                                                     f"{config('models')['roles'][r]['model']}" for r in PANEL_ROLES}},
+        "cost_usd": round(getattr(gw, "total_cost", 0.0) - cost_before, 4),
+        "calls_with_unknown_price": getattr(gw, "unknown_cost_calls", 0) - unknown_before,
     }
-    dr["learn"] = pick_concepts(dr)
-    dr["whatsapp"] = whatsapp(dr)
-    dr["report_path"] = save_report(dr, b.model_dump())
-    led.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?,?,?)",
-                [verdict_id, state["run_id"], symbol, horizon, fa["decision"], fa["actionable"], dr["issued_at"], dumps(dr)])
-    led.execute("UPDATE runs SET status=?, finished_at=?, final_decision=?, actionable=?, cost_usd=?, summary=? WHERE run_id=?",
-                ["completed" if not failed_roles and critique is not None else "partial", iso(), fa["decision"], fa["actionable"],
-                 dr["cost_usd"], head_dict.get("summary"), state["run_id"]])
-    ev.log("outputs", f"Ledger: verdict {verdict_id} with evaluation contract {dr['evaluation_contract']['id']}")
-    ev.log("outputs", f"Report saved: {dr['report_path']}")
-    ev.end("outputs", "completed", f"{fa['decision'].upper()} · cost ${dr['cost_usd']:.4f}", {"verdict_id": verdict_id})
-    return {"run_id": state["run_id"], "status": "completed", "verdict_id": verdict_id, "decision_record": dr}
+    dr["evaluation_contract"]["id"] = f"eval-{dr['verdict_id']}"
+    dr["top_sources"] = rank_sources(b, dr, idx)
+    dr["open_questions"] = open_questions(dr)
+    led.execute("INSERT INTO loop_records VALUES (?,?,?,?)", [run_id, loop, iso(), dumps(dr)])
+    ev.log("outputs", f"Loop {loop} record stored: {len(dr['top_sources'])} ranked sources, {len(dr['open_questions'])} open question(s)")
+    if last:
+        ev.log("outputs", f"Final loop — verdict {dr['verdict_id']} with evaluation contract {dr['evaluation_contract']['id']}")
+    else:
+        ev.log("outputs", f"Open questions passed to loop {loop + 1}: " + ("; ".join(q[:70] for q in dr["open_questions"][:3]) or "none"))
+    ev.end("outputs", "completed", f"{fa['decision'].upper()} · loop cost ${dr['cost_usd']:.4f}", {"verdict_id": dr["verdict_id"] if last else None})
+    return dr, gw

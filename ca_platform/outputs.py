@@ -3,7 +3,72 @@ All text is rendered from validated FINAL fields — never a persuasive buy narr
 blocked plan (spec §9 'final consistency')."""
 from __future__ import annotations
 
-from .settings import REPORTS
+from datetime import datetime
+
+from .settings import REPORTS, config
+
+EXCLUDE_FROM_RANKING = {"price_series", "computed_feature", "chart_pattern", "company_profile"}
+
+
+def rank_sources(bundle, dr: dict, idx, limit: int = 10) -> list[dict]:
+    """Rank external sources by quality × how much the panel relied on them × recency.
+
+    score = tier weight × (1 + 0.6·verified citations + 0.2·id-only citations) × recency
+    Recency: ≤30 days 1.0, ≤90 days 0.85, older 0.7, unknown date 0.75. Computed sources
+    (prices, technicals) are excluded — they are our own calculations, shown elsewhere.
+    """
+    weights = {k: v.get("weight", 0.5) for k, v in config("sources")["tiers"].items()}
+    used: dict[str, dict] = {}
+
+    def walk(o, by: str):
+        if isinstance(o, dict):
+            if "evidence_id" in o and "quote" in o:
+                st = idx.check(o)
+                if st in ("verified", "id_only"):
+                    u = used.setdefault(o["evidence_id"], {"verified": 0, "id_only": 0, "by": set()})
+                    u[st] += 1
+                    u["by"].add(by)
+            for v in o.values():
+                walk(v, by)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x, by)
+
+    for role, rep in (dr.get("reports") or {}).items():
+        walk(rep, role)
+    walk(dr.get("head_proposal"), "head")
+    walk(dr.get("critique"), "critic")
+    try:
+        decided = datetime.fromisoformat(bundle.decision_at)
+    except ValueError:
+        decided = None
+    out = []
+    for e in bundle.evidence:
+        if e.kind in EXCLUDE_FROM_RANKING:
+            continue
+        u = used.get(e.id, {"verified": 0, "id_only": 0, "by": set()})
+        age_days, rec = None, 0.75
+        if e.published_at and decided:
+            try:
+                age_days = (decided - datetime.fromisoformat(e.published_at.replace("Z", "+00:00"))).days
+                rec = 1.0 if age_days <= 30 else 0.85 if age_days <= 90 else 0.7
+            except ValueError:
+                pass
+        w = weights.get(e.tier, 0.5) if e.tier != "DEMO_synthetic" else 0.6  # demo: rank by usage for display only
+        score = w * (1 + 0.6 * u["verified"] + 0.2 * u["id_only"]) * rec
+        why = [config("sources")["tiers"].get(e.tier, {}).get("label", e.tier)]
+        if u["verified"] or u["id_only"]:
+            why.append(f"cited {u['verified'] + u['id_only']}× ({u['verified']} verified)"
+                       + (f" by {', '.join(sorted(u['by']))}" if u["by"] else ""))
+        else:
+            why.append("not cited by the panel")
+        why.append(f"{age_days} days old" if age_days is not None else "publication date unknown")
+        out.append({"evidence_id": e.id, "title": e.title, "publisher": e.publisher, "tier": e.tier, "url": e.url,
+                    "published_at": e.published_at, "score": round(score, 3), "why": " · ".join(why),
+                    "verified_citations": u["verified"]})
+    out.sort(key=lambda x: (-x["score"], x["evidence_id"]))
+    return out[:limit]
+
 
 DISCLAIMER = "Analysis, not investment advice. Personal research only."
 

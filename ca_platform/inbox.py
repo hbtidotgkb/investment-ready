@@ -50,15 +50,22 @@ def ingest_batch(batch: CaptureBatch) -> dict:
             continue
         fp = _fingerprint(passages)
         sid = "src-" + sha256_text(url)[:12]
+        q = led.fetchone("SELECT * FROM capture_queue WHERE queue_id=?", [it.queue_id]) if it.queue_id else None
         existing = led.fetchall("SELECT version, fingerprint FROM research_sources WHERE source_id=? ORDER BY version", [sid])
         if any(r["fingerprint"] == fp for r in existing):
             v = next(r["version"] for r in existing if r["fingerprint"] == fp)
             res.update(status="duplicate", source_id=sid, version=v, reason="Identical content already ingested")
+            if q:
+                _queue_set(it.queue_id, "captured", source_id=sid, version=v)
+                if q["symbol"]:
+                    link_symbol(sid, q["symbol"], method="queue")
             out_items.append(res)
             continue
         version = (existing[-1]["version"] + 1) if existing else 1
         first_seen = led.fetchone("SELECT MIN(first_seen_at) AS f FROM research_sources WHERE source_id=?", [sid])
         companies = nse.resolve_companies(it.title + " " + " ".join(p["text"] for p in passages[:40]), master)
+        if q and q["symbol"]:
+            companies = _with_link(companies, q["symbol"], master, "queue")
         warnings = list(it.access_warnings) + (["truncated_by_extension"] if it.truncated else [])
         access = "partially_read" if it.truncated else "capture_unverified"
         usage = "personal_research_user_attested" if it.usage_attested else "unattested_not_for_model"
@@ -67,6 +74,8 @@ def ingest_batch(batch: CaptureBatch) -> dict:
                     [sid, version, url, it.title[:500], domain_of(url), it.author, it.published_at, it.captured_at,
                      (first_seen or {}).get("f") or now, now, fp, access, usage, it.truncated, json.dumps(warnings),
                      json.dumps(passages), json.dumps(companies), batch.research_session_id])
+        if q:
+            _queue_set(it.queue_id, "captured", source_id=sid, version=version)
         res.update(status="accepted", source_id=sid, version=version,
                    reason="New version of an existing source" if existing else None,
                    tier=tier_for(url, "T4_capture_unverified"), usage_status=usage, access_status=access,
@@ -77,6 +86,84 @@ def ingest_batch(batch: CaptureBatch) -> dict:
             "note": "Captures are attributed, unverified research inputs. Import does not verify any claim."}
     led.execute("INSERT INTO ingestion_receipts VALUES (?,?,?)", [rid, body["created_at"], json.dumps(body)])
     return body
+
+
+def _with_link(companies: dict, symbol: str, master: list[dict], method: str) -> dict:
+    """Attach an explicit user-chosen company link. Explicit user links win over ambiguity."""
+    sym = symbol.upper().strip()
+    if any(c["symbol"] == sym for c in companies.get("resolved", [])):
+        return companies
+    m = next((r for r in master if r["symbol"] == sym), None)
+    entry = {"symbol": sym, "name": m["name"] if m else sym, "isin": m["isin"] if m else None, "matched": f"user:{method}"}
+    return {"resolved": [entry] + companies.get("resolved", []), "ambiguous": companies.get("ambiguous", [])}
+
+
+def link_symbol(source_id: str, symbol: str, method: str = "user") -> dict:
+    """Link the latest version of a source to a symbol (e.g. when name matching was ambiguous)."""
+    led = get_ledger()
+    r = led.fetchone("SELECT version, company_links FROM research_sources WHERE source_id=? ORDER BY version DESC LIMIT 1", [source_id])
+    if not r:
+        raise KeyError(source_id)
+    links = _with_link(json.loads(r["company_links"] or "{}"), symbol, nse.equity_master(), method)
+    led.execute("UPDATE research_sources SET company_links=? WHERE source_id=? AND version=?",
+                [json.dumps(links), source_id, r["version"]])
+    return links
+
+
+# ------------------------------------------------------------------ article queue ---
+
+def _queue_set(queue_id: str, status: str, **kw) -> None:
+    sets = ["status=?", "updated_at=?"] + [f"{k}=?" for k in kw]
+    get_ledger().execute(f"UPDATE capture_queue SET {', '.join(sets)} WHERE queue_id=?",
+                         [status, iso(), *kw.values(), queue_id])
+
+
+def queue_add(urls: list[str], symbol: str | None = None, note: str | None = None) -> dict:
+    """Queue article URLs for the extension to capture in the user's own signed-in browser.
+    ET hosts only (the extension's optional permission); duplicates of pending items are skipped."""
+    from .settings import config
+    led = get_ledger()
+    limit = int((config("user").get("inbox") or {}).get("queue_max_pending", 20))
+    pending = led.fetchone("SELECT COUNT(*) AS n FROM capture_queue WHERE status IN ('pending','in_progress')")["n"]
+    added, rejected = [], []
+    for raw in urls:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            cu = canonical_url(raw)
+        except ValueError as e:
+            rejected.append({"url": raw, "reason": str(e)})
+            continue
+        if domain_of(cu) != "economictimes.indiatimes.com":
+            rejected.append({"url": raw, "reason": "Only economictimes.indiatimes.com articles can be queued (extension permission)"})
+            continue
+        if led.fetchone("SELECT 1 AS x FROM capture_queue WHERE canonical_url=? AND status IN ('pending','in_progress')", [cu]):
+            rejected.append({"url": raw, "reason": "Already queued"})
+            continue
+        if pending >= limit:
+            rejected.append({"url": raw, "reason": f"Queue limit {limit} reached"})
+            continue
+        qid = "q-" + uuid.uuid4().hex[:10]
+        led.execute("INSERT INTO capture_queue VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    [qid, raw, cu, (symbol or "").upper().strip() or None, (note or "")[:300] or None, "pending",
+                     iso(), iso(), None, None, None])
+        pending += 1
+        added.append({"queue_id": qid, "url": cu})
+    return {"added": added, "rejected": rejected}
+
+
+def queue_list(status: str | None = None) -> list[dict]:
+    led = get_ledger()
+    if status:
+        return led.fetchall("SELECT * FROM capture_queue WHERE status=? ORDER BY created_at", [status])
+    return led.fetchall("SELECT * FROM capture_queue ORDER BY created_at DESC LIMIT 200")
+
+
+def queue_update(queue_id: str, status: str, error: str | None = None) -> None:
+    if status not in ("pending", "in_progress", "failed", "cancelled"):
+        raise ValueError("invalid status")
+    _queue_set(queue_id, status, error=(error or "")[:500] or None)
 
 
 def list_sources(limit: int = 200) -> list[dict]:

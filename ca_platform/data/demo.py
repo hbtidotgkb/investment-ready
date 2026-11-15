@@ -46,7 +46,17 @@ def candles(end: date | None = None, n: int = 320) -> list[dict]:
     return out
 
 
-def manual_doc(decision_day: date) -> dict:
+def manual_doc(decision_day: date, loop: int = 1) -> dict:
+    doc = _manual_doc(decision_day)
+    if loop > 1:  # targeted discovery answers two open forensic questions from loop 1
+        doc["notes"] += [
+            {"source": "ar", "text": "Receivable days were 62 at year end versus 58 a year earlier, while revenue grew 12%."},
+            {"source": "ar", "text": "Contingent liabilities were 4% of net worth, mainly bank guarantees for executed contracts."},
+        ]
+    return doc
+
+
+def _manual_doc(decision_day: date) -> dict:
     q_end = date(decision_day.year, ((decision_day.month - 1) // 3) * 3 + 1, 1) - timedelta(days=1)
     pub = (q_end + timedelta(days=38)).isoformat() + "T18:30:00+05:30"
     return {
@@ -82,7 +92,17 @@ def manual_doc(decision_day: date) -> dict:
     }
 
 
-def news_items(decision_day: date) -> list[dict]:
+def news_items(decision_day: date, loop: int = 1) -> list[dict]:
+    items = _news_items(decision_day)
+    if loop > 1:
+        items.append({"title": "DEMO: Demo Precision says rail order margin will be about 11%", "publisher": "Demo Financial Daily",
+                      "published_at": (decision_day - timedelta(days=3)).isoformat() + "T09:00:00+05:30", "via": "discovery:news",
+                      "text": "Management said the EBITDA margin on the rail order is expected to be about 11%, below the company's "
+                              "recent average of 14%, as the contract involves a larger share of bought-out components."})
+    return items
+
+
+def _news_items(decision_day: date) -> list[dict]:
     d = lambda k: (decision_day - timedelta(days=k)).isoformat() + "T09:00:00+05:30"  # noqa: E731
     return [
         {"title": "DEMO: Demo Precision wins Rs 420 crore order from a state rail operator", "publisher": "Demo Financial Daily",

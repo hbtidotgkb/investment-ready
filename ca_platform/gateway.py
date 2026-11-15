@@ -1,16 +1,15 @@
-"""LLM gateway (spec §12). One place where every model call happens.
+"""LLM gateway (spec §12). One place where every model call happens, for every provider.
 
-Guarantees:
+Guarantees (identical for Anthropic and OpenAI roles):
   * Monthly budget cap enforced in code, with a per-run reservation taken before a panel.
-  * Every call recorded: role, prompt version, configured + served model, provider request id,
-    tokens, web searches, cost, latency, full request and response (local audit store).
-  * Cache keyed by a hash of the COMPLETE effective request — any change to inputs, prompt,
-    model or settings changes the key (spec §12 "Cache by a canonical hash ...").
-  * Structured outputs validated by Pydantic, then by a caller-supplied semantic validator.
-    Up to `max_validation_repairs` bounded repair attempts carry the exact validation errors.
-    Repair never asks the model to change its analytical view — only to fix the stated defects.
-  * Server-side refusal fallback is enabled; if a fallback model served the call, the
-    substitution is recorded and surfaced (never silent).
+  * Every call recorded: role, provider, prompt version, configured + served model, provider
+    request id, tokens, web searches, cost (or "price unknown"), latency, full request/response.
+  * Cache keyed by a hash of the COMPLETE effective request (provider, model, settings, prompt,
+    messages, schema) — any change to inputs changes the key.
+  * Structured outputs validated by Pydantic, then by a caller-supplied semantic validator, with
+    up to `max_validation_repairs` bounded repairs carrying the exact defects. Repair never asks
+    the model to change its analytical view.
+  * Anthropic: server-side refusal fallback enabled; a substitution is recorded, never silent.
 """
 from __future__ import annotations
 
@@ -22,9 +21,10 @@ from typing import Any, Callable, Optional, Type
 from pydantic import BaseModel, ValidationError
 
 from .ledger import Ledger
-from .settings import canonical_hash, config, get_secret, iso, now_ist
+from .settings import PROVIDER_KEYS, canonical_hash, config, get_secret, iso, now_ist
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+OPENAI_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 
 
 class BudgetExceeded(RuntimeError):
@@ -42,19 +42,41 @@ class CallResult(BaseModel):
     record: dict = {}
 
 
-def _price(model: str) -> dict:
-    return config("models")["pricing_usd_per_mtok"].get(model, {"input": 0.0, "output": 0.0})
+def price_of(model: str) -> dict | None:
+    return config("models")["pricing_usd_per_mtok"].get(model)
 
 
-def cost_of(model: str, usage: Any, web_searches: int = 0) -> float:
-    p = _price(model)
+def cost_of(model: str, usage: Any, web_searches: int = 0) -> tuple[float, bool]:
+    """(usd, price_known). Unknown prices return 0.0 with price_known=False — never a guess."""
+    p = price_of(model)
+    if not p:
+        return 0.0, False
     inp = getattr(usage, "input_tokens", 0) or 0
     cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cr = getattr(usage, "cache_read_input_tokens", 0) or 0
     out = getattr(usage, "output_tokens", 0) or 0
     usd = (inp * p["input"] + cw * p["input"] * 1.25 + cr * p["input"] * 0.1 + out * p["output"]) / 1e6
     usd += web_searches * config("models")["pricing_usd_per_mtok"].get("web_search_per_1k", 10.0) / 1000
-    return round(usd, 6)
+    return round(usd, 6), True
+
+
+def role_provider(role: str) -> str:
+    return config("models")["roles"][role].get("provider", "anthropic")
+
+
+def vendor_separation() -> dict:
+    roles = config("models")["roles"]
+    prov = {r: roles[r].get("provider", "anthropic") for r in ("quant", "news", "forensic", "head", "critic")}
+    hc = prov["head"] != prov["critic"]
+    brains = len({prov["quant"], prov["news"], prov["forensic"]})
+    status = "separated" if hc and brains >= 2 else ("partial" if hc or brains >= 2 else "degraded")
+    return {"status": status, "head_critic_separated": hc, "distinct_brain_providers": brains, "providers": prov,
+            "models": {r: roles[r]["model"] for r in prov}}
+
+
+def missing_keys(roles: list[str]) -> list[str]:
+    need = {PROVIDER_KEYS[role_provider(r)] for r in roles}
+    return sorted(k for k in need if not get_secret(k))
 
 
 class Budget:
@@ -64,7 +86,11 @@ class Budget:
     def status(self) -> dict:
         cap = float(config("user")["budget"]["monthly_llm_budget_usd"])
         spent = self.ledger.month_spend_usd(now_ist().strftime("%Y-%m"))
-        return {"cap_usd": cap, "spent_usd": round(spent, 4), "remaining_usd": round(cap - spent, 4)}
+        unknown = self.ledger.fetchone(
+            "SELECT COUNT(*) AS n FROM request_records WHERE created_at LIKE ? AND status='ok' AND cost_usd IS NULL",
+            [now_ist().strftime("%Y-%m") + "%"])["n"]
+        return {"cap_usd": cap, "spent_usd": round(spent, 4), "remaining_usd": round(cap - spent, 4),
+                "calls_with_unknown_price": unknown}
 
     def reserve(self, amount: float) -> None:
         s = self.status()
@@ -80,16 +106,34 @@ class Gateway:
         self.log = log or (lambda stage, msg: None)
         self.cfg = config("models")
         self.total_cost = 0.0
+        self.unknown_cost_calls = 0
         self.fallback_events: list[dict] = []
-        key = get_secret("ANTHROPIC_API_KEY")
-        self._client = None
-        if key:
+        self._clients: dict[str, Any] = {}
+
+    # ----------------------------------------------------------- clients ---
+    def client(self, provider: str):
+        if provider in self._clients:
+            return self._clients[provider]
+        key = get_secret(PROVIDER_KEYS[provider])
+        if not key:
+            raise LLMUnavailable(f"{PROVIDER_KEYS[provider]} is not configured (needed for {provider} roles)")
+        if provider == "anthropic":
             import anthropic
-            self._client = anthropic.AsyncAnthropic(api_key=key, max_retries=2, timeout=600.0)
+            c = anthropic.AsyncAnthropic(api_key=key, max_retries=2, timeout=600.0)
+        elif provider == "openai":
+            import openai
+            c = openai.AsyncOpenAI(api_key=key, max_retries=2, timeout=600.0)
+        else:
+            raise LLMUnavailable(f"Unsupported provider {provider!r}")
+        self._clients[provider] = c
+        return c
+
+    def available_for(self, role: str) -> bool:
+        return bool(get_secret(PROVIDER_KEYS[role_provider(role)]))
 
     @property
-    def available(self) -> bool:
-        return self._client is not None
+    def available(self) -> bool:  # discovery/research helpers are Anthropic-locked
+        return bool(get_secret(PROVIDER_KEYS["anthropic"]))
 
     def role_cfg(self, role: str) -> dict:
         return self.cfg["roles"][role]
@@ -101,17 +145,24 @@ class Gateway:
             [request_hash])
 
     def _record(self, **kw) -> dict:
+        price_known = kw.get("price_known", True)
+        cost = kw.get("cost_usd", 0.0) if price_known else None
         rec = {"request_id": kw.get("request_id") or f"req-{uuid.uuid4().hex[:12]}", "run_id": self.run_id,
                "role": kw["role"], "model": kw["model"], "prompt_version": kw["prompt_version"],
                "request_hash": kw["request_hash"], "provider_request_id": kw.get("provider_request_id"),
                "input_tokens": kw.get("input_tokens", 0), "output_tokens": kw.get("output_tokens", 0),
-               "web_searches": kw.get("web_searches", 0), "cost_usd": kw.get("cost_usd", 0.0),
+               "web_searches": kw.get("web_searches", 0), "cost_usd": cost,
                "latency_ms": kw.get("latency_ms", 0), "status": kw["status"], "created_at": iso(),
                "request": json.dumps(kw.get("request"), default=str, ensure_ascii=False),
                "response": json.dumps(kw.get("response"), default=str, ensure_ascii=False)}
         self.ledger.execute("INSERT INTO request_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             list(rec.values()))
-        self.total_cost += rec["cost_usd"]
+        if cost is None and kw["status"] == "ok":
+            self.unknown_cost_calls += 1
+        self.total_cost += cost or 0.0
+        rec["cost_usd"] = cost or 0.0
+        rec["price_known"] = price_known
+        rec["provider"] = kw.get("provider", "anthropic")
         rec["served_model"] = kw.get("served_model", kw["model"])
         rec["cache_hit"] = kw.get("cache_hit", False)
         rec["fallback"] = kw.get("fallback")
@@ -121,32 +172,35 @@ class Gateway:
     async def structured(self, *, role: str, stage: str, system: str, user: str,
                          output_model: Type[BaseModel],
                          semantic_check: Callable[[BaseModel], list[str]] | None = None) -> CallResult:
-        """Structured call with Pydantic + semantic validation and bounded repair."""
-        if not self.available:
-            raise LLMUnavailable("ANTHROPIC_API_KEY is not configured")
+        """Structured call with Pydantic + semantic validation and bounded repair, any provider."""
         rc = self.role_cfg(role)
+        provider = rc.get("provider", "anthropic")
         model, effort, max_tokens = rc["model"], rc.get("effort", "high"), rc.get("max_tokens", 16000)
+        self.client(provider)  # fail fast with a clear message if the key is missing
         messages: list[dict] = [{"role": "user", "content": user}]
         attempts = 1 + int(self.cfg.get("max_validation_repairs", 2))
         last_errors: list[str] = []
         history: list[dict] = []
         for attempt in range(attempts):
-            request = {"model": model, "effort": effort, "max_tokens": max_tokens, "system": system,
-                       "messages": messages, "schema": output_model.__name__, "prompt_version": rc["prompt"]}
+            request = {"provider": provider, "model": model, "effort": effort, "max_tokens": max_tokens,
+                       "system": system, "messages": messages, "schema": output_model.__name__,
+                       "prompt_version": rc["prompt"]}
             rhash = canonical_hash(request)
             cached = self._cached(rhash)
             if cached:
                 resp = json.loads(cached["response"])
                 parsed = output_model.model_validate(resp["parsed"])
-                rec = dict(cached, cache_hit=True, served_model=resp.get("served_model", model))
+                rec = dict(cached, cache_hit=True, provider=provider, served_model=resp.get("served_model", model),
+                           cost_usd=0.0, price_known=True)
                 self.log(stage, f"Cache hit for identical request ({rhash[:10]}…) — no new model call")
             else:
-                self.log(stage, f"Calling {model} (effort={effort}, prompt {rc['prompt']})"
+                self.log(stage, f"Calling {provider}:{model} (effort={effort}, prompt {rc['prompt']})"
                          + (f" — repair attempt {attempt}" if attempt else ""))
-                parsed, rec = await self._call_parse(role, request, rhash, system, messages, model, effort,
-                                                     max_tokens, output_model)
+                call = self._call_anthropic if provider == "anthropic" else self._call_openai
+                parsed, rec = await call(role, request, rhash, system, messages, model, effort, max_tokens, output_model)
+                cost_txt = f"${rec['cost_usd']:.4f}" if rec["price_known"] else "cost unknown (add pricing in config/models.yaml)"
                 self.log(stage, f"Response in {rec['latency_ms']/1000:.1f}s · {rec['input_tokens']:,} in / "
-                         f"{rec['output_tokens']:,} out tokens · ${rec['cost_usd']:.4f}"
+                         f"{rec['output_tokens']:,} out tokens · {cost_txt}"
                          + (f" · served by fallback {rec['served_model']}" if rec.get("fallback") else ""))
             errors: list[str] = []
             if parsed is None:
@@ -171,45 +225,42 @@ class Gateway:
                 ]
         raise ValueError(f"{role}: output still invalid after {attempts} attempt(s): " + "; ".join(last_errors[:5]))
 
-    async def _call_parse(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model):
+    async def _call_anthropic(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model):
         import anthropic
         t0 = time.monotonic()
+        base = dict(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
+                    request=request, provider="anthropic")
         try:
-            resp = await self._client.beta.messages.parse(
+            resp = await self.client("anthropic").beta.messages.parse(
                 model=model, max_tokens=max_tokens, system=system, messages=messages,
                 output_config={"effort": effort}, output_format=output_model,
                 betas=[FALLBACK_BETA], fallbacks="default",
             )
         except (anthropic.BadRequestError, anthropic.AuthenticationError, anthropic.PermissionDeniedError,
                 anthropic.NotFoundError) as e:
-            rec = self._record(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
-                               status="error", request=request, response={"error": str(e)},
-                               latency_ms=int((time.monotonic() - t0) * 1000))
+            self._record(**base, status="error", response={"error": str(e)}, latency_ms=int((time.monotonic() - t0) * 1000))
             raise LLMUnavailable(f"{type(e).__name__}: {getattr(e, 'message', e)}") from e
         except (ValidationError, json.JSONDecodeError) as e:
-            rec = self._record(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
-                               status="invalid", request=request, response={"error": str(e)[:2000]},
+            rec = self._record(**base, status="invalid", response={"error": str(e)[:2000]},
                                latency_ms=int((time.monotonic() - t0) * 1000))
             rec["error"] = f"Schema validation failed: {str(e)[:400]}"
             return None, rec
         latency = int((time.monotonic() - t0) * 1000)
-        served = getattr(resp, "model", model)
+        served = getattr(resp, "model", model) or model
         fallback = None
-        if served and served != model:
+        if served != model:
             fallback = {"configured": model, "served": served, "role": role}
             self.fallback_events.append(fallback)
-        usage = resp.usage
-        cost = cost_of(served if served in config("models")["pricing_usd_per_mtok"] else model, usage)
+        cost, known = cost_of(served if price_of(served) else model, resp.usage)
         parsed = getattr(resp, "parsed_output", None)
         error = None
         if resp.stop_reason == "refusal":
             parsed, error = None, f"Model declined (refusal: {getattr(resp.stop_details, 'category', None)})"
         elif resp.stop_reason == "max_tokens":
             parsed, error = None, "Output truncated at max_tokens"
-        rec = self._record(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
-                           provider_request_id=getattr(resp, "_request_id", None),
-                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens, cost_usd=cost,
-                           latency_ms=latency, status="ok" if parsed is not None else "invalid", request=request,
+        rec = self._record(**base, provider_request_id=getattr(resp, "_request_id", None),
+                           input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens, cost_usd=cost,
+                           price_known=known, latency_ms=latency, status="ok" if parsed is not None else "invalid",
                            response={"parsed": parsed.model_dump() if parsed is not None else None,
                                      "stop_reason": resp.stop_reason, "served_model": served},
                            served_model=served, fallback=fallback)
@@ -217,20 +268,71 @@ class Gateway:
             rec["error"] = error
         return parsed, rec
 
+    async def _call_openai(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model):
+        """OpenAI Responses API with Pydantic structured output (strict JSON schema)."""
+        import openai
+        t0 = time.monotonic()
+        base = dict(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
+                    request=request, provider="openai")
+        kwargs = dict(model=model, instructions=system, input=[{"role": m["role"], "content": m["content"]} for m in messages],
+                      text_format=output_model, max_output_tokens=max_tokens, store=False,
+                      reasoning={"effort": OPENAI_EFFORT.get(effort, "medium")})
+        client = self.client("openai")
+        try:
+            try:
+                resp = await client.responses.parse(**kwargs)
+            except openai.BadRequestError as e:
+                if "reasoning" not in str(e).lower():
+                    raise
+                kwargs.pop("reasoning")  # non-reasoning model: retry once without the effort setting
+                self.log("gateway", f"{model} does not accept reasoning effort — retrying without it")
+                resp = await client.responses.parse(**kwargs)
+        except (openai.BadRequestError, openai.AuthenticationError, openai.PermissionDeniedError,
+                openai.NotFoundError) as e:
+            self._record(**base, status="error", response={"error": str(e)}, latency_ms=int((time.monotonic() - t0) * 1000))
+            raise LLMUnavailable(f"OpenAI {type(e).__name__}: {getattr(e, 'message', e)}") from e
+        except (ValidationError, json.JSONDecodeError) as e:
+            rec = self._record(**base, status="invalid", response={"error": str(e)[:2000]},
+                               latency_ms=int((time.monotonic() - t0) * 1000))
+            rec["error"] = f"Schema validation failed: {str(e)[:400]}"
+            return None, rec
+        latency = int((time.monotonic() - t0) * 1000)
+        served = getattr(resp, "model", model) or model
+        parsed = getattr(resp, "output_parsed", None)
+        error = None
+        if getattr(resp, "status", "completed") == "incomplete":
+            parsed = None
+            error = f"Incomplete response: {getattr(getattr(resp, 'incomplete_details', None), 'reason', 'unknown')}"
+        elif parsed is None:
+            refusal = next((c.refusal for o in (resp.output or []) for c in (getattr(o, "content", None) or [])
+                            if getattr(c, "type", "") == "refusal"), None)
+            error = f"Model declined: {refusal}" if refusal else "No structured output returned"
+        usage = resp.usage
+        cost, known = cost_of(model, usage)
+        rec = self._record(**base, provider_request_id=getattr(resp, "id", None),
+                           input_tokens=getattr(usage, "input_tokens", 0), output_tokens=getattr(usage, "output_tokens", 0),
+                           cost_usd=cost, price_known=known, latency_ms=latency,
+                           status="ok" if parsed is not None else "invalid",
+                           response={"parsed": parsed.model_dump() if parsed is not None else None,
+                                     "status": getattr(resp, "status", None), "served_model": served},
+                           served_model=served)
+        if error:
+            rec["error"] = error
+        return parsed, rec
+
     # ---------------------------------------------------- web discovery ---
     async def web_discovery(self, *, role: str, stage: str, system: str, user: str,
                             allowed_domains: list[str], max_uses: int = 5) -> dict:
-        """Search-grounded discovery. Returns cited passages straight from the API's
-        citation objects (url, title, verbatim cited_text) plus the raw result list."""
-        if not self.available:
-            raise LLMUnavailable("ANTHROPIC_API_KEY is not configured")
+        """Search-grounded discovery (Anthropic web search). Returns cited passages straight from
+        the API's citation objects (url, title, verbatim cited_text) plus the raw result list."""
         rc = self.role_cfg(role)
         model, effort = rc["model"], rc.get("effort", "low")
+        client = self.client("anthropic")
         tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses,
                   "allowed_domains": allowed_domains, "user_location": {"type": "approximate", "country": "IN"}}]
         messages: list[dict] = [{"role": "user", "content": user}]
-        request = {"model": model, "effort": effort, "system": system, "messages": messages, "tools": tools,
-                   "prompt_version": rc["prompt"], "day": now_ist().date().isoformat()}
+        request = {"provider": "anthropic", "model": model, "effort": effort, "system": system, "messages": messages,
+                   "tools": tools, "prompt_version": rc["prompt"], "day": now_ist().date().isoformat()}
         rhash = canonical_hash(request)
         cached = self._cached(rhash)
         if cached:
@@ -243,7 +345,7 @@ class Gateway:
         served = model
         resp = None
         for _ in range(4):  # handle pause_turn continuation
-            resp = await self._client.beta.messages.create(
+            resp = await client.beta.messages.create(
                 model=model, max_tokens=rc.get("max_tokens", 16000), system=system, messages=messages,
                 tools=tools, output_config={"effort": effort}, betas=[FALLBACK_BETA], fallbacks="default")
             served = resp.model or model
@@ -272,24 +374,23 @@ class Gateway:
                     for r in b.content:
                         results.append({"url": r.url, "title": r.title, "page_age": getattr(r, "page_age", None)})
         usage = type("U", (), {"input_tokens": usage_in, "output_tokens": usage_out})()
-        cost = cost_of(model, usage, searches)
+        cost, known = cost_of(model, usage, searches)
         out = {"text": "\n".join(text_parts), "citations": cited, "results": results,
                "served_model": served, "stop_reason": resp.stop_reason if resp else None}
         rec = self._record(role=role, model=model, prompt_version=rc["prompt"], request_hash=rhash,
                            provider_request_id=getattr(resp, "_request_id", None), input_tokens=usage_in,
-                           output_tokens=usage_out, web_searches=searches, cost_usd=cost, latency_ms=latency,
-                           status="ok", request=request, response=out, served_model=served)
-        self.log(stage, f"{searches} searches, {len(results)} results, {len(cited)} cited passages · ${cost:.4f}")
+                           output_tokens=usage_out, web_searches=searches, cost_usd=cost, price_known=known,
+                           latency_ms=latency, status="ok", request=request, response=out, served_model=served)
+        self.log(stage, f"{searches} searches, {len(results)} results, {len(cited)} cited passages · ${rec['cost_usd']:.4f}")
         return out | {"record": rec}
 
     # ------------------------------------------------- free text + docs ---
     async def cited_answer(self, *, role: str, system: str, documents: list[dict], question: str) -> dict:
         """Research Q&A using the Citations API over custom-content documents. Each passage is
         its own content block, so every citation maps back to an exact passage id."""
-        if not self.available:
-            raise LLMUnavailable("ANTHROPIC_API_KEY is not configured")
         rc = self.role_cfg(role)
         model = rc["model"]
+        client = self.client("anthropic")
         content: list[dict] = []
         for d in documents:
             content.append({"type": "document", "title": d["title"][:250],
@@ -297,13 +398,14 @@ class Gateway:
                                        "content": [{"type": "text", "text": p["text"]} for p in d["passages"]]},
                             "citations": {"enabled": True}})
         content.append({"type": "text", "text": question})
-        request = {"model": model, "system": system, "docs": [[p["id"] for p in d["passages"]] for d in documents],
+        request = {"provider": "anthropic", "model": model, "system": system,
+                   "docs": [[p["id"] for p in d["passages"]] for d in documents],
                    "question": question, "prompt_version": rc["prompt"]}
         rhash = canonical_hash(request | {"texts": canonical_hash(documents)})
         t0 = time.monotonic()
-        resp = await self._client.messages.create(model=model, max_tokens=rc.get("max_tokens", 8000), system=system,
-                                                  messages=[{"role": "user", "content": content}],
-                                                  output_config={"effort": rc.get("effort", "low")})
+        resp = await client.messages.create(model=model, max_tokens=rc.get("max_tokens", 8000), system=system,
+                                            messages=[{"role": "user", "content": content}],
+                                            output_config={"effort": rc.get("effort", "low")})
         parts = []
         for b in resp.content:
             if b.type != "text":
@@ -317,10 +419,46 @@ class Gateway:
                     cites.append({"document": doc["title"], "source_id": doc.get("source_id"),
                                   "passage_ids": pids, "cited_text": c.cited_text})
             parts.append({"text": b.text, "citations": cites})
-        cost = cost_of(model, resp.usage)
+        cost, known = cost_of(model, resp.usage)
         self._record(role=role, model=model, prompt_version=rc["prompt"], request_hash=rhash,
                      provider_request_id=getattr(resp, "_request_id", None), input_tokens=resp.usage.input_tokens,
-                     output_tokens=resp.usage.output_tokens, cost_usd=cost,
+                     output_tokens=resp.usage.output_tokens, cost_usd=cost, price_known=known,
                      latency_ms=int((time.monotonic() - t0) * 1000), status="ok", request=request,
                      response={"parts": parts})
         return {"parts": parts, "cost_usd": cost, "model": resp.model}
+
+
+# ------------------------------------------------------------ model catalog ---
+
+_CATALOG: dict[str, tuple[float, list[dict]]] = {}
+
+
+def model_catalog(provider: str, refresh: bool = False) -> dict:
+    """Latest models from the provider's Models API (cached 1h). Falls back to suggestions
+    from config when the key is missing — clearly labelled as not live."""
+    now = time.time()
+    if not refresh and provider in _CATALOG and now - _CATALOG[provider][0] < 3600:
+        return {"provider": provider, "live": True, "models": _CATALOG[provider][1]}
+    key = get_secret(PROVIDER_KEYS[provider])
+    sugg = [{"id": m, "label": m, "priced": bool(price_of(m))} for m in config("models").get("suggested_models", {}).get(provider, [])]
+    if not key:
+        return {"provider": provider, "live": False, "models": sugg,
+                "note": f"Add {PROVIDER_KEYS[provider]} to load the live model list."}
+    try:
+        if provider == "anthropic":
+            import anthropic
+            rows = list(anthropic.Anthropic(api_key=key).models.list(limit=50))
+            models = [{"id": m.id, "label": getattr(m, "display_name", m.id), "created": str(getattr(m, "created_at", "")),
+                       "priced": bool(price_of(m.id))} for m in rows]
+        else:
+            import openai
+            rows = list(openai.OpenAI(api_key=key).models.list())
+            keep = [m for m in rows if m.id.startswith(("gpt-", "o", "chatgpt-")) and not any(
+                x in m.id for x in ("audio", "realtime", "transcribe", "tts", "image", "embedding", "search", "moderation"))]
+            keep.sort(key=lambda m: getattr(m, "created", 0), reverse=True)
+            models = [{"id": m.id, "label": m.id, "created": getattr(m, "created", None), "priced": bool(price_of(m.id))}
+                      for m in keep[:15]]
+        _CATALOG[provider] = (now, models)
+        return {"provider": provider, "live": True, "models": models}
+    except Exception as e:  # network/auth problems are shown, not hidden
+        return {"provider": provider, "live": False, "models": sugg, "note": f"Live list unavailable: {type(e).__name__}"}
