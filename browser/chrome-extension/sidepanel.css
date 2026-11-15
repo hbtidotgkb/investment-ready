@@ -1,6 +1,7 @@
 :root { color-scheme: light dark; --bg: #fcfcfb; --s2: #f0efeb; --b: #e2e1dc; --t: #0b0b0b; --t2: #52514e; --a: #2a78d6; --good: #0a7d3c; --warn: #9a6400; --bad: #c0302f; }
 @media (prefers-color-scheme: dark) { :root { --bg: #1a1a19; --s2: #232321; --b: #2e2e2b; --t: #f0efec; --t2: #c3c2b7; --a: #3987e5; --good: #3cc47a; --warn: #e2a93a; --bad: #f07070; } }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; padding: 12px 14px 30px; background: var(--bg); color: var(--t); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .brand { display: flex; gap: 8px; align-items: center; } .brand small { display: block; color: var(--t2); font-size: 11px; }
