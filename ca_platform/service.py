@@ -42,6 +42,12 @@ def pairing_token(rotate: bool = False) -> str:
 
 
 app = FastAPI(title="Personal CA Platform", version=__version__, docs_url=None, redoc_url=None)
+
+
+@app.on_event("startup")
+def _open_ledger_now():
+    """Own the DuckDB ledger from startup so CLI commands reliably route through this server."""
+    get_ledger()
 app.mount("/static", StaticFiles(directory=str(WEB)), name="static")
 TASKS: set[asyncio.Task] = set()
 
@@ -198,6 +204,21 @@ def models_set(req: ModelsUpdate):
 def cfg_reload():
     reload_config()
     return {"ok": True, "versions": config_versions()}
+
+
+class IngestRequest(BaseModel):
+    days: int = 260
+
+
+@app.post("/api/ingest/bhav")
+async def ingest_bhav(req: IngestRequest):
+    from .data import bhav
+    if not 1 <= req.days <= 1500:
+        raise HTTPException(400, "days must be 1..1500")
+    t = asyncio.create_task(asyncio.to_thread(bhav.ingest, req.days))
+    TASKS.add(t)
+    t.add_done_callback(TASKS.discard)
+    return {"started": True, "days": req.days}
 
 
 @app.get("/api/symbols")

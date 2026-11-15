@@ -323,12 +323,42 @@ class Gateway:
     # ---------------------------------------------------- web discovery ---
     async def web_discovery(self, *, role: str, stage: str, system: str, user: str,
                             allowed_domains: list[str], max_uses: int = 5) -> dict:
-        """Search-grounded discovery (Anthropic web search). Returns cited passages straight from
-        the API's citation objects (url, title, verbatim cited_text) plus the raw result list."""
+        """Search-grounded discovery with domains Anthropic's search cannot reach removed first.
+
+        Some publishers block Anthropic's crawler; the API then rejects the whole request. Blocked
+        domains are learned from that error, remembered, logged, and the request is retried without
+        them (their content still arrives via RSS headlines and your browser captures)."""
+        import anthropic
+        blocked = blocked_search_domains()
+        usable = [d for d in allowed_domains if d not in blocked]
+        skipped = [d for d in allowed_domains if d in blocked]
+        if skipped:
+            self.log(stage, f"Search skips {len(skipped)} publisher(s) that block Anthropic's crawler: {', '.join(skipped)}")
+        for _ in range(3):
+            if not usable:
+                raise LLMUnavailable("No allow-listed domain is reachable by web search")
+            try:
+                return await self._web_discovery(role=role, stage=stage, system=system, user=user,
+                                                 allowed_domains=usable, max_uses=max_uses)
+            except anthropic.BadRequestError as e:
+                found = _blocked_from_error(str(e))
+                if not found:
+                    raise
+                remember_blocked_domains(found)
+                usable = [d for d in usable if d not in found]
+                self.log(stage, f"Publishers blocking Anthropic's crawler (now skipped): {', '.join(found)}")
+        raise LLMUnavailable("Web search kept rejecting the domain list")
+
+    async def _web_discovery(self, *, role: str, stage: str, system: str, user: str,
+                             allowed_domains: list[str], max_uses: int = 5) -> dict:
         rc = self.role_cfg(role)
         model, effort = rc["model"], rc.get("effort", "low")
         client = self.client("anthropic")
-        tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses,
+        # Deliberately the BASIC search tool: web_search_20260209 filters results through code
+        # execution and its final text carries no citation objects (verified 15 Nov 2026), which
+        # would break verbatim-quote accountability. The basic tool returns web_search_result_location
+        # citations with the source's own cited_text.
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses,
                   "allowed_domains": allowed_domains, "user_location": {"type": "approximate", "country": "IN"}}]
         messages: list[dict] = [{"role": "user", "content": user}]
         request = {"provider": "anthropic", "model": model, "effort": effort, "system": system, "messages": messages,
@@ -426,6 +456,38 @@ class Gateway:
                      latency_ms=int((time.monotonic() - t0) * 1000), status="ok", request=request,
                      response={"parts": parts})
         return {"parts": parts, "cost_usd": cost, "model": resp.model}
+
+
+# ------------------------------------------------- search-blocked publishers ---
+
+def _blocked_file():
+    from .settings import SETTINGS_DIR
+    return SETTINGS_DIR / "search_blocked_domains.json"
+
+
+def blocked_search_domains() -> set[str]:
+    f = _blocked_file()
+    if not f.exists():
+        return set()
+    try:
+        return set(json.loads(f.read_text(encoding="utf-8")).get("domains", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def remember_blocked_domains(domains: list[str]) -> None:
+    cur = blocked_search_domains() | set(domains)
+    _blocked_file().write_text(json.dumps({"domains": sorted(cur), "updated_at": iso(),
+                                           "why": "Publisher blocks Anthropic's crawler; web search rejects requests including it"}),
+                               encoding="utf-8")
+
+
+def _blocked_from_error(msg: str) -> list[str]:
+    import re
+    m = re.search(r"not accessible to our user agent:\s*\[([^\]]*)\]", msg)
+    if not m:
+        return []
+    return [d.strip().strip("'\"") for d in m.group(1).split(",") if d.strip()]
 
 
 # ------------------------------------------------------------ model catalog ---

@@ -172,7 +172,7 @@ def _issue(led, run_id: str, dr: dict) -> None:
     dr["report_path"] = save_report(dr, bundle)
     led.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?,?,?)",
                 [dr["verdict_id"], run_id, dr["symbol"], dr["horizon"], fa["decision"], fa["actionable"], dr["issued_at"], dumps(dr)])
-    complete = not dr["failed_roles"] and dr.get("critique") is not None
+    complete = not dr["failed_roles"] and dr.get("critique") is not None and dr.get("panel_complete", True)
     led.execute("UPDATE runs SET status=?, finished_at=?, final_decision=?, actionable=?, cost_usd=?, summary=? WHERE run_id=?",
                 ["completed" if complete else "partial", iso(), fa["decision"], fa["actionable"], dr["cost_usd"],
                  dr["head_proposal"].get("summary"), run_id])
@@ -652,6 +652,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "rule_results": enf["rule_results"], "adjustments": enf["adjustments"], "governance": enf["governance"],
         "calculations": enf["calculations"], "final_action": fa, "consistency_check": cons,
         "failed_roles": failed_roles, "labels": labels, "brains": roles_models,
+        "panel_complete": head_draft is not None and critique is not None and final is not None,
         "vendor_separation": vendor_separation(),
         "fallback_events": getattr(gw, "fallback_events", []),
         "asked_questions": asked,

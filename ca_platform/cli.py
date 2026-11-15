@@ -8,6 +8,50 @@ import json
 import sys
 
 
+def _ledger_locked() -> bool:
+    """DuckDB allows one process; when `ca serve` holds the ledger, CLI commands go through it."""
+    import duckdb
+    from .ledger import DB_PATH
+    try:
+        duckdb.connect(str(DB_PATH)).close()
+        return False
+    except duckdb.IOException as e:
+        return "used by another process" in str(e) or "lock" in str(e).lower()
+
+
+def _server():
+    import httpx
+    from .settings import SECRETS_DIR, config
+    base = f"http://127.0.0.1:{config('user')['service']['port']}"
+    tok = (SECRETS_DIR / "pairing_token").read_text(encoding="utf-8").strip()
+    return httpx.Client(base_url=base, timeout=60, headers={"x-ca-token": tok, "origin": base})
+
+
+def _analyse_via_server(a):
+    print("(ca serve is running — sending the run to it; watch it live in the UI too)")
+    with _server() as c:
+        r = c.post("/api/runs", json={"symbol": a.symbol, "horizon": a.horizon, "action": a.action, "mode": a.mode, "loops": a.loops})
+        r.raise_for_status()
+        run_id = r.json()["run_id"]
+        with c.stream("GET", f"/api/runs/{run_id}/events", timeout=None) as s:
+            for line in s.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                e = json.loads(line[6:])
+                if e["type"] == "stage_end":
+                    mark = {"completed": "✔", "failed": "✖", "skipped": "↷", "degraded": "!"}.get(e["status"], "•")
+                    print(f"  {mark} L{e.get('loop', 1)} {e['stage']:<12} {e['message'][:105]}")
+                if e["type"] == "run_end":
+                    break
+        d = c.get(f"/api/runs/{run_id}").json()
+    dr = d.get("decision_record")
+    if not dr:
+        print(f"\nRun did not complete: {d['run']['summary']}")
+        sys.exit(1)
+    print("\n" + dr["whatsapp"])
+    print(f"\nFull report: {dr['report_path']}\nUI: http://127.0.0.1:{_server().base_url.port}/#/run/{run_id}")
+
+
 def _print_events(run_id: str):
     from .events import REGISTRY
     ev = REGISTRY.get(run_id)
@@ -20,6 +64,8 @@ def _print_events(run_id: str):
 
 
 def cmd_analyse(a):
+    if _ledger_locked():
+        return _analyse_via_server(a)
     from .orchestrator import run_analysis
     print(f"Analysing {a.symbol or 'DEMO'} · horizon {a.horizon} · mode {a.mode} …")
     r = asyncio.run(run_analysis(a.symbol, a.horizon, a.action, a.mode, loops=a.loops))
@@ -43,6 +89,13 @@ def cmd_serve(a):
 
 
 def cmd_ingest_bhav(a):
+    if _ledger_locked():
+        with _server() as c:
+            r = c.post("/api/ingest/bhav", json={"days": a.days})
+            r.raise_for_status()
+        print("ca serve is running — bhavcopy ingestion started inside it (≈1 request/second). "
+              "Progress: System page → NSE bhavcopy store.")
+        return
     from .data import bhav
     print(f"Ingesting up to {a.days} trading days of NSE bhavcopy (≈1 request/second, cached) …")
     r = bhav.ingest(a.days, progress=lambda m: print("  " + m) if a.verbose else None)
@@ -67,13 +120,21 @@ def cmd_secrets(a):
 
 def cmd_import(a):
     from .contracts import CaptureBatch
-    from .inbox import ingest_batch
     with open(a.file, encoding="utf-8") as fh:
         batch = CaptureBatch.model_validate(json.load(fh))
+    if _ledger_locked():
+        with _server() as c:
+            print(json.dumps(c.post("/v1/research/captures", json=batch.model_dump()).json(), indent=1))
+        return
+    from .inbox import ingest_batch
     print(json.dumps(ingest_batch(batch), indent=1))
 
 
 def cmd_health(a):
+    if _ledger_locked():
+        with _server() as c:
+            print(json.dumps(c.get("/api/health").json(), indent=1))
+        return
     from .service import health
     print(json.dumps(health(), indent=1, default=str))
 
