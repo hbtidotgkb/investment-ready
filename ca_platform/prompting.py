@@ -41,11 +41,26 @@ def system_prompt(role: str) -> tuple[str, str]:
 # -------------------------------------------------------------- rendering ---
 
 ROLE_KINDS = {
-    "quant": {"price_series", "computed_feature", "chart_pattern", "manual_fact", "exchange_filing", "company_profile"},
+    "quant": {"price_series", "computed_feature", "chart_pattern", "manual_fact", "exchange_filing", "company_profile",
+              "news_summary", "exchange_announcement"},
     "news": {"news_article", "web_search_citation", "exchange_announcement", "browser_capture", "pdf",
-             "company_profile", "computed_feature"},
-    "forensic": {"exchange_filing", "manual_fact", "exchange_announcement", "company_profile", "web_search_citation"},
+             "company_profile", "computed_feature", "news_summary"},
+    "forensic": {"exchange_filing", "manual_fact", "exchange_announcement", "company_profile", "web_search_citation",
+                 "news_summary", "news_article", "browser_capture"},
 }
+# Newsdesk items carry retrieved_via "newsdesk:<source>:<event_type>"; narrow them per remit.
+FORENSIC_PRESS_TYPES = ("governance_flag", "accounting_concern", "regulatory_action", "insider_pledge", "litigation")
+QUANT_FILING_TYPES = ("results", "dividend_buyback", "fundraise", "scheduled")
+
+
+def _role_allows(role: str, e: Evidence) -> bool:
+    via = e.retrieved_via or ""
+    etype = via.rsplit(":", 1)[-1] if via.startswith("newsdesk:") else ""
+    if role == "quant" and e.kind == "exchange_announcement":
+        return etype in QUANT_FILING_TYPES          # filed results/catalysts only; no other announcements
+    if role == "forensic" and e.kind in ("news_article", "browser_capture"):
+        return etype in FORENSIC_PRESS_TYPES        # press governance/accounting/regulatory reports only
+    return True
 # Within shared kinds, narrow by acquisition path so each role sees its remit.
 ROLE_EXCLUDE_VIA = {
     "quant": {"discovery:news"},
@@ -91,7 +106,8 @@ def context_block(b: Bundle, pre: list[dict], prior: list[dict]) -> str:
 def brain_view(role: str, b: Bundle, pre: list[dict], prior: list[dict]) -> tuple[str, list[str]]:
     """User message for a specialist. Returns (text, omitted_evidence_ids)."""
     kinds, excl = ROLE_KINDS[role], ROLE_EXCLUDE_VIA[role]
-    items = [e for e in b.evidence if e.kind in kinds and e.retrieved_via not in excl and e.usage_status != "excluded"]
+    items = [e for e in b.evidence if e.kind in kinds and e.retrieved_via not in excl and e.usage_status != "excluded"
+             and _role_allows(role, e)]
     if role == "news":  # News sees only the return/price-reaction slice of computed features
         items = [e for e in items if e.kind != "computed_feature" or e.title.startswith("Price reaction")]
     rendered, omitted, total = [], [], 0
@@ -157,7 +173,7 @@ def panel_bundle_view(b: Bundle, reports_obj) -> str:
     whole = {w[:-2] for w in want if w.endswith(":*")}
     keep: set[str] = set()
     for e in b.evidence:
-        core = e.kind in ("computed_feature", "chart_pattern", "company_profile") or e.tier == "T1_official"
+        core = e.kind in ("computed_feature", "chart_pattern", "company_profile", "news_summary") or e.tier == "T1_official"
         for p in e.passages:
             if core or p.id in want or e.id in whole:
                 keep.add(p.id)

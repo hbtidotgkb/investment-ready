@@ -62,7 +62,7 @@ const FIX_HINTS = {
 const roleModel = (role) => (HEALTH && HEALTH.models && HEALTH.models[role]) || '';
 
 /* --------------------------------------------------------------- router */
-const ROUTES = { '': viewHome, runs: viewRuns, run: viewRun, inbox: viewInbox, source: viewSource, portfolio: viewPortfolio, system: viewSystem, et: viewET, batch: viewBatch };
+const ROUTES = { '': viewHome, runs: viewRuns, run: viewRun, inbox: viewInbox, source: viewSource, portfolio: viewPortfolio, system: viewSystem, et: viewET, batch: viewBatch, news: viewNews };
 let CLEANUP = null;
 async function route() {
   if (CLEANUP) { CLEANUP(); CLEANUP = null; }
@@ -663,6 +663,78 @@ function claimsHtml(cs) {
     <div>${esc(c.text)}</div><div class="small muted">“${esc(c.quote)}” — ${esc(c.passage_id)}${c.author_or_broker ? ' · ' + esc(c.author_or_broker) : ''}${c.target_price ? ' · target ' + fmt(c.target_price, 0) : ''}${c.horizon_text ? ' · ' + esc(c.horizon_text) : ''}</div>
     <div class="small"><b>Verify:</b> ${esc(c.verification_task)}</div></div>`).join('');
 }
+
+/* ------------------------------------------------------------- Newsdesk */
+const ND_PILL = { filed: 'good', confirmed: 'good', filing_on_event: 'info', investigative: 'warn', unconfirmed: '', contradicted: 'bad', denied: 'bad' };
+
+async function viewNews(sym) {
+  const wl = await api('/api/newsdesk/watchlist');
+  sym = (sym || (wl.stocks[0] || {}).symbol || '').toUpperCase();
+  const w = wl.worker || {};
+  $('#app').innerHTML = `<div class="grid" style="grid-template-columns:260px 1fr;align-items:start">
+    <div class="card tight"><h3>Newsdesk watchlist</h3>
+      <p class="small muted">Watched stocks are refreshed in the background while <code>ca serve</code> runs${w.last_sweep ? ` · last sweep ${esc(w.last_sweep.slice(11, 16))}` : ''}${w.next_in_minutes ? ` · every ${w.next_in_minutes} min now` : ''}.</p>
+      ${wl.stocks.map((s) => `<div class="row" style="margin:4px 0"><a href="#/news/${esc(s.symbol)}" class="${s.symbol === sym ? 'pill info' : 'pill'}">${esc(s.symbol)}</a><span class="small muted">${s.last_refresh ? esc(s.last_refresh.slice(5, 16).replace('T', ' ')) : 'never'}</span></div>`).join('') || '<div class="muted small">No stocks yet.</div>'}
+      <div class="row" style="margin-top:10px"><input id="nd-add" type="text" placeholder="Add, e.g. TCS" style="width:120px;text-transform:uppercase"><button class="btn sm" id="nd-add-go">Add</button></div>
+      <p class="small muted" style="margin-top:10px">Any symbol works without adding it — open <code>#/news/SYMBOL</code>. Adding it enables background refresh.</p></div>
+    <div id="nd-main">${sym ? '<div class="card"><div class="loading">Building dossier… the first fetch of a stock can take a few minutes (NSE filings and their PDFs, at a polite one request per second); later refreshes are quick.</div></div>' : '<div class="card empty">Add a stock to start.</div>'}</div></div>`;
+  $('#nd-add-go').onclick = async () => { const s = $('#nd-add').value.trim().toUpperCase(); if (!s) return; try { await api('/api/newsdesk/watchlist', { method: 'POST', body: { symbol: s, watch: true } }); location.hash = `#/news/${s}`; } catch (e) { toast(e.message); } };
+  if (sym) loadDossier(sym, 'auto');
+}
+
+async function loadDossier(sym, refresh) {
+  const days = store.get('nd-days', 90);
+  const main = $('#nd-main'); if (!main) return;
+  let d;
+  try { d = await api(`/api/newsdesk/dossier/${sym}?days=${days}&refresh=${refresh}`); } catch (e) { main.innerHTML = `<div class="card notice bad">${esc(e.message)}</div>`; return; }
+  const entry = await api(`/api/newsdesk/entry/${sym}`);
+  const q = d.quality, C = d.citations;
+  const rep = d.refresh_report;
+  const cite = (n) => { const c = C[String(n)]; return c ? `<span class="cite ${c.tier === 'T1_official' ? 'verified' : 'id_only'}" data-nd="${c.article_id}" title="${esc(c.publisher)} · ${esc(c.tier)}${c.headline_only ? ' · headline only' : ''}">${n}</span>` : ''; };
+  if (d.refreshing) setTimeout(() => { if (location.hash.startsWith('#/news')) loadDossier(sym, 'no'); }, 45000);
+  main.innerHTML = `${d.refreshing ? '<div class="card notice info">Showing stored news while a background refresh runs (NSE filings and PDFs are slow). This view reloads by itself.</div>' : ''}<div class="card"><div class="row"><h2 style="margin:0">${esc(d.symbol)}</h2><span class="muted">${esc(d.name)}</span><span class="spacer"></span>
+      <div class="seg" id="nd-days">${[30, 90, 180].map((k) => `<button data-d="${k}" class="${k === days ? 'on' : ''}">${k}d</button>`).join('')}</div>
+      <button class="btn sm" id="nd-refresh">Refresh now</button><a class="btn sm primary" href="#/" id="nd-analyse">Analyse ${esc(d.symbol)}</a></div>
+    <p class="small muted">As of ${dt(d.as_of)} · last fetch ${d.last_refresh ? dt(d.last_refresh) : 'never'}${rep ? ' · ' + Object.entries(rep.sources).map(([k, v]) => `${k}: ${v.items}`).join(' · ') : ''}${rep && rep.failed.length ? ` · <span class="res fail">failed: ${esc(rep.failed.join('; '))}</span>` : ''}</p>
+    <div class="kv"><div><span>Events</span><b>${q.events}</b></div><div><span>Filed / confirmed</span><b>${q.filed_or_confirmed}</b></div><div><span>Filing on event</span><b>${q.filing_on_event}</b></div>
+      <div><span>Press only</span><b>${q.press_only}</b></div><div><span>Contradicted / denied</span><b>${q.against}</b></div><div><span>Headline only</span><b>${q.headline_only_events}</b></div></div>
+    <p class="small muted">Set aside (kept on record, not used): ${Object.entries(q.dropped).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'none'}</p></div>
+  ${d.check_first.length ? `<div class="card notice bad"><b>Check these first:</b><br>${d.check_first.map(esc).join('<br>')}</div>` : ''}
+  <div class="card"><h3>Events, ranked</h3><p class="small muted">score = materiality × confidence × recency. Wording-alike articles from several outlets count as one story; a press figure is "confirmed" only by a filed figure of the same metric within 5%.</p>
+    ${d.events.map((e, i) => `<div class="obj ${e.status === 'contradicted' || e.status === 'denied' ? 'blocker' : e.status === 'filed' || e.status === 'confirmed' ? '' : 'minor'}">
+      <div class="row"><b>${i + 1}.</b><span class="pill ${ND_PILL[e.status] || ''}">${esc(e.status_label)}</span><span class="pill">${esc(titleCase(e.type))}</span><span class="pill">${esc(e.fact_type)}</span>${e.direction !== '0' ? `<span class="pill">${esc(e.direction)}</span>` : ''}<span class="spacer"></span>
+        <span class="small muted">conf ${e.confidence} · weight ${e.score}</span></div>
+      <div>${esc(e.title)} ${e.citations.map(cite).join('')}</div>
+      <div class="small muted">${e.filings} filing(s) · ${e.independent_press_stories} independent press stor${e.independent_press_stories === 1 ? 'y' : 'ies'} · ${esc(e.publishers.join(', '))} · first seen ${esc(e.first_seen.slice(0, 10))}</div>
+      ${e.claims.filter((c) => c.amount_cr).length ? `<div class="small">${e.claims.filter((c) => c.amount_cr).map((c) => `<span class="pill ${ND_PILL[c.status] || ''}">${esc(c.status)}</span> ${esc(c.metric)} ₹${fmt(c.amount_cr, 0)} cr — ${esc(c.text.slice(0, 140))}`).join('<br>')}</div>` : ''}</div>`).join('') || '<div class="empty">No events in this window.</div>'}</div>
+  <div class="grid g2"><div class="card"><h3>Coming up</h3>${d.coming_up.map((c) => `<div class="small"><b>${esc(c.date)}</b> ${esc(c.what)} ${cite(c.citation)}</div>`).join('') || '<div class="muted small">Nothing scheduled in filings.</div>'}
+      <h3 style="margin-top:12px">Not known yet</h3>${d.not_known.map((x) => `<div class="small">• ${esc(x)}</div>`).join('') || '<div class="muted small">—</div>'}</div>
+    <div class="card"><h3>Names used to match news</h3><p class="small muted">aliases identify the company · link_only = shorthand matched case-sensitively · related = subsidiaries/brands (ranked lower) · exclude = look-alikes removed before matching.</p>
+      ${['aliases', 'link_only', 'related', 'exclude'].map((k) => `<label class="small"><b>${k}</b><input id="nd-${k}" type="text" style="width:100%" value="${esc((entry[k] || []).join(', '))}"></label>`).join('')}
+      <div class="row" style="margin-top:8px"><label class="small">market cap ₹ cr <input id="nd-mcap" type="text" style="width:120px" value="${esc(entry.market_cap_cr || '')}"></label><button class="btn sm primary" id="nd-save">Save &amp; watch</button></div></div></div>`;
+  $('#nd-days').onclick = (e) => { const k = e.target.dataset.d; if (k) { store.set('nd-days', Number(k)); loadDossier(sym, 'no'); } };
+  $('#nd-refresh').onclick = () => { main.querySelector('.card').insertAdjacentHTML('afterbegin', '<div class="notice info">Refreshing…</div>'); loadDossier(sym, 'force'); };
+  $('#nd-analyse').onclick = () => { try { sessionStorage.setItem('ca-sym', sym); } catch (e) { /* ignore */ } };
+  $('#nd-save').onclick = async () => {
+    const list = (k) => $(`#nd-${k}`).value.split(',').map((x) => x.trim()).filter(Boolean);
+    try { await api('/api/newsdesk/watchlist', { method: 'POST', body: { symbol: sym, aliases: list('aliases'), link_only: list('link_only'), related: list('related'), exclude: list('exclude'), market_cap_cr: parseFloat($('#nd-mcap').value) || null, watch: true } }); toast('Saved — refreshing with the new names'); viewNews(sym); }
+    catch (e) { toast(e.message); }
+  };
+}
+
+document.addEventListener('click', async (e) => {
+  const c = e.target.closest('[data-nd]');
+  if (!c) return;
+  const a = await api(`/api/newsdesk/article/${c.dataset.nd}`).catch(() => null);
+  if (!a) return;
+  $('#drawer-title').textContent = `Saved copy #${a.id}`;
+  $('#drawer-body').innerHTML = `<h3>${esc(a.title)}</h3><div class="row"><span class="tier ${esc(a.tier)}">${esc(a.tier)}</span><span class="small muted">${esc(a.publisher)} · ${esc(a.via || '')}</span></div>
+    <table style="margin:10px 0"><tbody><tr><td>Published</td><td>${a.published_at ? dt(a.published_at) : 'unknown'}</td></tr><tr><td>First seen</td><td>${dt(a.first_seen_at)}</td></tr>
+    <tr><td>Link</td><td><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.url.slice(0, 70))} ↗</a></td></tr><tr><td>SHA-256</td><td class="mono small">${esc(a.content_hash)}</td></tr>
+    ${a.dropped_reason ? `<tr><td>Set aside</td><td>${esc(a.dropped_reason)}</td></tr>` : ''}</tbody></table>
+    ${a.is_stub ? '<div class="notice">Headline only — the article text was not retrieved.</div>' : `<div class="passage" style="white-space:pre-wrap">${esc((a.body || '').slice(0, 20000))}</div>`}`;
+  $('#drawer').hidden = false;
+});
 
 /* ------------------------------------------------------------- ET Prime */
 const STATE_PILL = { captured: 'good', pending: 'info', in_progress: 'info', done: 'good', failed: 'bad', cancelled: '', not_captured: 'warn' };

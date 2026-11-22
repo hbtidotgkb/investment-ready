@@ -1,0 +1,67 @@
+# Newsdesk — per-stock news collection, claim checking and ranking (adapted from
+# references_news/NEWSDESK_GUIDE.md, integrated into the platform). Edit freely; reload with
+# System → "Reload config files".
+version: newsdesk@1
+
+window_days: 90                 # default dossier window
+max_events: 15                  # events shown in a dossier
+
+# Freshness before an on-demand dossier refetches (minutes)
+freshness_minutes: {market: 5, other: 30}
+
+# Background polling while `ca serve` runs (laptop only, per spec). Minutes between sweeps.
+worker:
+  enabled: true
+  market_minutes: 10            # 09:15-15:30 IST
+  post_market_minutes: 10       # 15:30-22:00 IST (results are filed in the evening)
+  other_minutes: 60
+
+# Official filings: NSE corporate announcements + their PDF attachments (honest client; BSE's
+# API refuses honestly-identified clients, so it is not used).
+filings:
+  days: 90
+  read_pdf: true
+  max_pdfs_per_refresh: 5        # NSE serves PDFs slowly; the background worker catches up
+  pdf_max_pages: 6
+  pdf_max_chars: 20000
+
+# Starting trust per tier (shown, not yet used for decisions). Learned trust is display-only until evaluated.
+trust: {T1_official: 0.97, T2_reputable_press: 0.78, T3_other_press: 0.6, T4_capture_unverified: 0.8, T5_aggregator: 0.5}
+
+# Filings kept on record but not used (paperwork). Matched against category + subject.
+routine_filings:
+  - "newspaper publication"
+  - "trading window"
+  - "certificate under sebi \\(depositories"
+  - "regulation 74\\(5\\)"
+  - "loss of share certificate|duplicate share certificate"
+  - "issue of (duplicate )?share certificate"
+  - "copy of (the )?newspaper"
+  - "compliance certificate"
+  - "statement of investor complaints"
+
+# Sponsored / paid content markers (kept on record, never used)
+paid_markers:
+  - "brand connect"
+  - "partner content"
+  - "sponsored"
+  - "advertorial"
+  - "in partnership with"
+
+# Low-quality items (live price pages, robo ratings, previews): kept on record, not used
+junk_patterns:
+  - "share price live"
+  - "stock price live updates"
+  - "live blog"
+  - "rated .{0,20} by marketsmojo"
+  - "stocks to watch today"
+  - "top gainers and losers"
+  - "should you buy, sell or hold"
+  - "stock price, news, quote"
+  - "share price (today|live)"
+  - "(call|put)s? contracts traded|draw [\\d,]+ contracts|options? (activity|volume)"
+  - "advances \\w+day, (out|under)performs market"
+  - "declines \\w+day, (out|under)performs market"
+
+# Press from publishers outside config/sources.yaml `domains` is kept on record but not used.
+registry_only_press: true

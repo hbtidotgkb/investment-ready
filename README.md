@@ -53,6 +53,28 @@ Choose 1–3 loops when starting a run (UI or `ca analyse TCS --loops 2`). Every
 
 The run page has a **tab per loop** with its own progress tracker, plus a **"What changed across loops"** table: evidence, questions searched, decisions, objections, governance coverage and citation integrity. Only the final loop issues a verdict; earlier loops are stored as loop records, so retries never inflate the track record. Cost scales with loops, and the budget reservation is multiplied accordingly.
 
+## Newsdesk (news module)
+
+`ca_platform/newsdesk/`, adapted from `references_news/` into the platform. It collects each stock's news, merges articles about the same event, checks press claims against filings, and ranks events. You can use it on its own from the **Newsdesk** page or with `ca news check|dossier|quality SYMBOL`. Every analysis also freezes a Newsdesk dossier into its evidence bundle.
+
+- **Sources:**
+  - NSE corporate announcements, with the **filed PDF read for figures** (official tier). NSE's archive serves them to an honest client; BSE's API refuses one, so BSE isn't used.
+  - Google News search, credited to the real publisher. **Only publishers in the source registry are used**; the rest are kept on record and set aside.
+  - Publisher RSS feeds.
+  - Your ET Prime captures.
+- **Claim statuses:**
+  - `filed`, `confirmed`, `contradicted`, `denied`, `filing_on_event`, `investigative` or `unconfirmed`.
+  - A press figure is confirmed or contradicted only by a filed figure **of the same metric** (order value vs order value, never vs revenue).
+  - Only a clarification *filing* can deny a press report.
+  - Wording-alike copies from several outlets count as **one** story.
+  - Statuses and scores are computed for the decision time, so dossiers are point-in-time, and unknown publication times stay unknown.
+- **Who uses it:**
+  - **News** brain: everything.
+  - **Forensic**: filings, plus press governance, accounting, regulatory, pledge and litigation reports.
+  - **Quant**: filed results, dividends and fund-raises, plus the "coming up" schedule.
+  - **Head and Critic**: see the statuses in the computed "Newsdesk summary" source.
+- **Background refresh:** while `ca serve` runs, watched stocks are refreshed: every 10 minutes during market and evening hours, hourly otherwise. Settings are in `config/newsdesk.yaml` (junk patterns, routine filings, PDF limits, polling). The first fetch of a stock can take a few minutes because NSE serves PDFs slowly.
+
 ## ET Prime lists → stock ideas → batch analysis
 
 The **ET Prime & ideas** page holds two lists you can edit any time. They're saved to `data/settings/et_lists.yaml`, which you can also edit by hand.

@@ -186,6 +186,20 @@ $('#allow-et').onclick = async () => {
   msg(ok ? 'ET access granted (economictimes.indiatimes.com only).' : 'ET site access was not granted.', ok ? 'good' : 'bad');
 };
 $('#attest').onchange = () => chrome.storage.local.set({ attest: $('#attest').checked });
+$('#visit').onchange = async () => {
+  if ($('#visit').checked) {
+    const ok = await chrome.permissions.request({ origins: [ET_ORIGIN] }).catch(() => false);
+    if (!ok || !$('#attest').checked) { $('#visit').checked = false; msg(!ok ? 'ET access is needed for this.' : 'Tick the personal-research attestation first.', 'bad'); return; }
+  }
+  await chrome.storage.local.set({ autoCaptureOnVisit: $('#visit').checked });
+  msg($('#visit').checked ? 'On: ET articles you open are captured after they finish loading.' : 'Off.', 'good');
+};
+function renderVisitLog(log) {
+  $('#visitlog').innerHTML = (log || []).slice(-5).reverse().map((l) => `${l.status === 'accepted' ? '✓' : l.status === 'duplicate' ? '↺' : '✖'} ${esc((l.title || '').slice(0, 60))}${l.companies.length ? ' · ' + esc(l.companies.join(', ')) : ' · no stock matched'}`).join('<br>');
+}
+chrome.storage.onChanged.addListener((ch, area) => { if (area === 'session' && ch.visitLog) renderVisitLog(ch.visitLog.newValue); });
+chrome.storage.local.get('autoCaptureOnVisit').then((v) => { $('#visit').checked = !!v.autoCaptureOnVisit; });
+chrome.storage.session.get('visitLog').then((v) => renderVisitLog(v.visitLog));
 $('#auto').onchange = () => { chrome.storage.local.set({ autoFetch: $('#auto').checked }); msg($('#auto').checked ? 'Auto-fetch on: new queued articles are captured within a minute.' : 'Auto-fetch off.', 'good'); };
 $('#cap-page').onclick = () => capture('page');
 $('#cap-sel').onclick = () => capture('selection');

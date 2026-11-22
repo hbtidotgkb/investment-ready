@@ -130,6 +130,43 @@ def cmd_import(a):
     print(json.dumps(ingest_batch(batch), indent=1))
 
 
+def cmd_news(a):
+    """Newsdesk on its own: check sources, print a dossier, show quality."""
+    sym = a.symbol.upper()
+    if _ledger_locked():
+        with _server() as c:
+            d = c.get(f"/api/newsdesk/dossier/{sym}", params={"days": a.days, "refresh": "force" if a.action == "check" else "auto"},
+                      timeout=300).json()
+    else:
+        from .newsdesk import dossier, pipeline
+        if a.action == "check" or not pipeline.is_fresh(sym):
+            r = pipeline.refresh(sym, lambda m: print("  " + m), a.days)
+            if a.action == "check":
+                print(json.dumps(r, indent=1))
+        d = dossier.build(sym, a.days)
+    if "detail" in d:
+        print(d["detail"])
+        sys.exit(1)
+    if a.action == "check" and "refresh_report" in d and d["refresh_report"]:
+        print(json.dumps(d["refresh_report"], indent=1))
+    q = d["quality"]
+    print(f"\n{d['symbol']} · {d['name']} · as of {d['as_of'][:16]} · {d['window_days']} days")
+    print(f"Quality: {q['events']} events · {q['filed_or_confirmed']} filed/confirmed · {q['filing_on_event']} filing on event · "
+          f"{q['press_only']} press-only · {q['against']} contradicted/denied · {q['headline_only_events']} headline-only · dropped {q['dropped']}")
+    if a.action == "quality":
+        return
+    for i, e in enumerate(d["events"], 1):
+        print(f"\n{i}. {e['title'][:110]}  {e['citations']}")
+        print(f"   {e['type']} · {e['status_label']} · conf {e['confidence']} · score {e['score']} · "
+              f"{e['filings']} filing(s), {e['independent_press_stories']} independent press stor{'y' if e['independent_press_stories'] == 1 else 'ies'}")
+    for c in d["coming_up"]:
+        print(f"\nComing up {c['date']}: {c['what'][:100]} [{c['citation']}]")
+    for x in d["check_first"]:
+        print(f"Check first: {x}")
+    for x in d["not_known"]:
+        print(f"Not yet known: {x}")
+
+
 def cmd_health(a):
     if _ledger_locked():
         with _server() as c:
@@ -165,6 +202,11 @@ def main(argv=None):
     s = sub.add_parser("import-captures", help="Import an exported capture JSON (extension fallback)")
     s.add_argument("file")
     s.set_defaults(fn=cmd_import)
+    s = sub.add_parser("news", help="Newsdesk on its own: check | dossier | quality for one stock")
+    s.add_argument("action", choices=["check", "dossier", "quality"])
+    s.add_argument("symbol")
+    s.add_argument("--days", type=int, default=90)
+    s.set_defaults(fn=cmd_news)
     s = sub.add_parser("health", help="Show configuration and connection status")
     s.set_defaults(fn=cmd_health)
     a = p.parse_args(argv)

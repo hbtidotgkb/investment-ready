@@ -29,8 +29,26 @@ function personalCaExtract(mode, maxChars) {
       const best = els.sort((a, b) => b.innerText.length - a.innerText.length)[0];
       if (best && best.innerText.trim().length > 400) { root = best; used = c; break; }
     }
+    if (!root) {
+      // Readability-style fallback (from Newsdesk): credit each leaf text block's length to its
+      // parent and grandparent; the container collecting the most prose is the article.
+      const score = new Map();
+      document.querySelectorAll('p, div, section, li, span').forEach((b) => {
+        if (b.querySelector('p, div, section') || !visible(b)) return;
+        const t = clean(b.innerText);
+        if (t.length < 60) return;
+        const linkText = [...b.querySelectorAll('a')].reduce((n, a) => n + (a.innerText || '').length, 0);
+        if (linkText / t.length > 0.4) return;               // menus, link lists
+        let up = b, w = 1;
+        for (let i = 0; i < 3 && up && up !== document.body; i++, w /= 2, up = up.parentElement) score.set(up, (score.get(up) || 0) + t.length * w);
+      });
+      let best = null, bestScore = 0;
+      for (const [el, s] of score) if (s > bestScore && !el.closest('nav, footer, aside, header')) { best = el; bestScore = s; }
+      if (best && clean(best.innerText).length > 400) { root = best; used = 'densest text block'; }
+    }
     if (!root) { root = document.body; used = 'body'; }
-    if (candidates.indexOf(used) > 5 || used === 'body') out.access_warnings.push(`fallback_selector:${used} — may include unrelated page content`);
+    if (candidates.indexOf(used) > 5 || used === 'body' || used === 'densest text block') out.access_warnings.push(`fallback_selector:${used} — may include unrelated page content`);
+    out.extraction_method = `page:${used}`;
     // ET article bodies often use bare text + <br>; the line-split fallback below covers that.
     const blocks = root.querySelectorAll('p, h2, h3, h4, li, blockquote, table');
     const seen = new Set();

@@ -45,9 +45,13 @@ app = FastAPI(title="Personal CA Platform", version=__version__, docs_url=None, 
 
 
 @app.on_event("startup")
-def _open_ledger_now():
-    """Own the DuckDB ledger from startup so CLI commands reliably route through this server."""
+async def _startup():
+    """Own the DuckDB ledger from startup so CLI commands reliably route through this server,
+    and start the Newsdesk background worker."""
     get_ledger()
+    from .newsdesk import worker
+    t = asyncio.create_task(worker.run_forever())
+    TASKS.add(t)
 app.mount("/static", StaticFiles(directory=str(WEB)), name="static")
 TASKS: set[asyncio.Task] = set()
 
@@ -389,7 +393,87 @@ async def holdings():
     return {"status": st, "holdings": [], "via": None}
 
 
-# ------------------------------------------------------------ ET lists & ideas ---
+# --------------------------------------------------------------------- Newsdesk ---
+
+class WatchEntry(BaseModel):
+    symbol: str
+    name: str | None = None
+    aliases: list[str] | None = None
+    link_only: list[str] | None = None
+    related: list[str] | None = None
+    exclude: list[str] | None = None
+    market_cap_cr: float | None = None
+    watch: bool = True
+
+
+@app.get("/api/newsdesk/watchlist")
+def nd_watchlist():
+    from .newsdesk import watch, worker
+    led = get_ledger()
+    rows = []
+    for e in watch.watchlist():
+        st = led.fetchone("SELECT last_refresh FROM nd_state WHERE symbol=?", [e["symbol"]])
+        rows.append(e | {"last_refresh": st["last_refresh"] if st else None})
+    return {"stocks": rows, "worker": worker.STATUS}
+
+
+@app.get("/api/newsdesk/entry/{symbol}")
+def nd_entry(symbol: str):
+    from .newsdesk import watch
+    return watch.get(symbol)
+
+
+@app.post("/api/newsdesk/watchlist")
+def nd_watch_upsert(req: WatchEntry):
+    from .newsdesk import watch
+    try:
+        return watch.upsert(req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/newsdesk/watchlist/{symbol}/remove")
+def nd_watch_remove(symbol: str):
+    from .newsdesk import watch
+    watch.remove(symbol)
+    return {"ok": True}
+
+
+@app.get("/api/newsdesk/dossier/{symbol}")
+async def nd_dossier_get(symbol: str, days: int = 90, refresh: str = "auto"):
+    from .newsdesk import dossier, pipeline
+    if not 7 <= days <= 365 or refresh not in ("auto", "force", "no"):
+        raise HTTPException(400, "days 7..365, refresh auto|force|no")
+    report, background = None, False
+    never = get_ledger().fetchone("SELECT 1 AS x FROM nd_state WHERE symbol=?", [symbol.upper()]) is None
+    if refresh == "force" or (refresh == "auto" and never):
+        report = await asyncio.to_thread(pipeline.refresh, symbol, lambda m: None, days)
+    elif refresh == "auto" and not pipeline.is_fresh(symbol) and symbol.upper() not in REFRESHING:
+        REFRESHING.add(symbol.upper())                # stale: answer now, refresh in the background
+
+        async def bg():
+            try:
+                await asyncio.to_thread(pipeline.refresh, symbol, lambda m: None, days)
+            finally:
+                REFRESHING.discard(symbol.upper())
+        t = asyncio.create_task(bg())
+        TASKS.add(t)
+        t.add_done_callback(TASKS.discard)
+        background = True
+    d = await asyncio.to_thread(dossier.build, symbol, days)
+    return d | {"refreshed_now": report is not None, "refreshing": background or symbol.upper() in REFRESHING}
+
+
+REFRESHING: set[str] = set()
+
+
+@app.get("/api/newsdesk/article/{article_id}")
+def nd_article(article_id: int):
+    from .newsdesk import dossier
+    a = dossier.article(article_id)
+    if not a:
+        raise HTTPException(404, "article not found")
+    return a
 
 class ETLists(BaseModel):
     news_articles: list[str] = []

@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS idea_mentions (mention_id VARCHAR PRIMARY KEY, source
   symbol VARCHAR, created_at VARCHAR, method VARCHAR, body JSON);
 CREATE TABLE IF NOT EXISTS batches (batch_id VARCHAR PRIMARY KEY, created_at VARCHAR, status VARCHAR,
   params JSON, items JSON, report_path VARCHAR);
+CREATE SEQUENCE IF NOT EXISTS nd_seq START 1;
+CREATE TABLE IF NOT EXISTS nd_articles (id BIGINT PRIMARY KEY, url VARCHAR UNIQUE, source VARCHAR, publisher VARCHAR,
+  tier VARCHAR, title VARCHAR, body VARCHAR, published_at VARCHAR, first_seen_at VARCHAR, fetched_at VARCHAR,
+  category VARCHAR, is_stub BOOLEAN, content_hash VARCHAR, dropped_reason VARCHAR, via VARCHAR);
+CREATE TABLE IF NOT EXISTS nd_links (article_id BIGINT, symbol VARCHAR, salience DOUBLE, PRIMARY KEY (article_id, symbol));
+CREATE TABLE IF NOT EXISTS nd_events (id BIGINT PRIMARY KEY, symbol VARCHAR, event_type VARCHAR, title VARCHAR,
+  direction VARCHAR, fact_type VARCHAR, sig JSON, first_seen VARCHAR, last_updated VARCHAR);
+CREATE TABLE IF NOT EXISTS nd_event_articles (event_id BIGINT, article_id BIGINT, PRIMARY KEY (event_id, article_id));
+CREATE TABLE IF NOT EXISTS nd_claims (id BIGINT PRIMARY KEY, article_id BIGINT, symbol VARCHAR, text VARCHAR,
+  amount_cr DOUBLE, metric VARCHAR);
+CREATE TABLE IF NOT EXISTS nd_state (symbol VARCHAR PRIMARY KEY, last_refresh VARCHAR, last_counts JSON);
 CREATE TABLE IF NOT EXISTS alerts (alert_id VARCHAR PRIMARY KEY, created_at VARCHAR, symbol VARCHAR,
   type VARCHAR, message VARCHAR, acknowledged BOOLEAN);
 """

@@ -180,6 +180,7 @@ def _issue(led, run_id: str, dr: dict) -> None:
 
 async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decision_at, loop, loops, carry, gw_live):
     fac = EvidenceFactory()
+    nd_info: dict = {}
     flags: list[str] = []
     today = date.fromisoformat(decision_at[:10])
     asked = carry.get("open_questions", []) if carry else []
@@ -332,21 +333,17 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 ev.log("filings", f"Surveillance (NSE ASM/GSM lists): {sv['status']}")
             else:
                 ev.log("filings", "NSE ASM/GSM lists unavailable — surveillance status unknown")
-            anns = await asyncio.to_thread(s.announcements, symbol)
-            if anns:
-                for a in anns[:25]:
-                    when = a.get("an_dt") or a.get("sort_date") or a.get("dt")
-                    body = " — ".join(x for x in [a.get("desc"), a.get("attchmntText")] if x)
-                    if not body:
-                        continue
-                    fac.add(kind="exchange_announcement", title=(a.get("desc") or "NSE announcement")[:200], publisher="NSE",
-                            tier="T1_official", url=a.get("attchmntFile"), passages=[body[:4000]], published_hint=when,
-                            retrieved_via="filings")
-                ev.log("filings", f"NSE announcements: {min(len(anns), 25)} in the last 90 days")
-            else:
-                ev.log("filings", "NSE announcements unavailable")
         finally:
             s.close()
+        from .newsdesk import pipeline as nd_pipeline
+        if nd_pipeline.is_fresh(symbol):
+            ev.log("filings", "Newsdesk: data is fresh (kept current by the background worker) — no refetch")
+        else:
+            ev.log("filings", "Newsdesk: refreshing NSE filings (with PDFs), press search, feeds and captures…")
+            nd_report = await asyncio.to_thread(nd_pipeline.refresh, symbol, lambda m: ev.log("filings", f"Newsdesk · {m}"))
+            nd_info["refresh"] = nd_report
+            for f in nd_report["failed"]:
+                ev.log("filings", f"Newsdesk source failed: {f}")
         doc = manual_mod.load(symbol)
         if doc:
             facts, mflags, msurv = manual_mod.to_evidence(doc, fac, decision_at)
@@ -386,16 +383,16 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         ev.log("news", "DEMO: synthetic press items" + (" (+1 found by targeted discovery)" if loop > 1 else ""))
         ev.end("news", "completed", f"{3 if loop > 1 else 2} items (DEMO)")
     else:
-        from .data import news as news_mod
-        items, nlog = await asyncio.to_thread(news_mod.search_headlines, company, symbol)
-        for line in nlog:
-            ev.log("news", line)
-        for it in items:
-            if it["published_at"] and it["published_at"] > decision_at:
-                continue
-            fac.add(kind="news_article", title=it["title"], publisher=it["publisher"], tier=it["tier"], url=it["url"],
-                    passages=[f"Headline: {it['title']}"], published_at=it["published_at"], retrieved_via="news:rss",
-                    notes=f"Headline only via {it['feed']}; body not retrieved.")
+        from .newsdesk import dossier as nd_dossier
+        dossier = await asyncio.to_thread(nd_dossier.build, symbol, None, iso())
+        nd_ev = nd_dossier.to_evidence(fac, dossier, candles)
+        q = dossier["quality"]
+        ev.log("news", f"Newsdesk dossier: {q['events']} events ({q['filed_or_confirmed']} filed/confirmed, "
+               f"{q['press_only']} press-only, {q['against']} contradicted/denied), {len(dossier['coming_up'])} coming up, "
+               f"{nd_ev['evidence_items']} sources frozen into the bundle")
+        for x in dossier["check_first"]:
+            ev.log("news", f"Check first: {x}")
+        nd_info["quality"] = q
         if gw_live.available:
             try:
                 sys_p, _ = system_prompt("discovery")
@@ -411,7 +408,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 ev.log("news", f"Search discovery failed ({type(e).__name__}: {str(e)[:120]})")
         tiers: dict[str, int] = {}
         for e in fac.items:
-            if e.retrieved_via.startswith(("news", "discovery:news")):
+            if e.retrieved_via.startswith(("news", "discovery:news")) and e.kind != "news_summary":
                 tiers[e.tier] = tiers.get(e.tier, 0) + 1
         ev.end("news", "completed", f"{sum(tiers.values())} news sources · " + ", ".join(f"{k}: {v}" for k, v in sorted(tiers.items())),
                {"by_tier": tiers})
@@ -426,10 +423,16 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 notes="; ".join(c["warnings"]))
         n_caps = 1
     else:
-        rows = led.fetchall("SELECT * FROM research_sources WHERE first_seen_at <= ? ORDER BY version DESC", [decision_at])
+        rows = led.fetchall("SELECT * FROM research_sources WHERE first_seen_at <= ? ORDER BY version DESC", [iso()])
         seen = set()
+        already = {e.url for e in fac.items if e.url}
         for r in rows:
             if r["source_id"] in seen:
+                continue
+            if r["canonical_url"] in already:
+                seen.add(r["source_id"])
+                n_caps += 1
+                ev.log("inbox", f"Capture already in the bundle via Newsdesk: {r['title'][:80]}")
                 continue
             links = json.loads(r["company_links"] or "{}")
             if symbol not in [x["symbol"] for x in links.get("resolved", [])]:
@@ -656,6 +659,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "vendor_separation": vendor_separation(),
         "fallback_events": getattr(gw, "fallback_events", []),
         "asked_questions": asked,
+        "newsdesk": nd_info,
         "evaluation_contract": {"id": None, "horizon": horizon, **config("horizons")["evaluation"],
                                 "benchmark_assumption": config("rules")["benchmark"], "frozen_at": iso()},
         "versions": b.versions | {"prompts": {r: config("models")["roles"][r]["prompt"] for r in PANEL_ROLES},

@@ -46,6 +46,25 @@ Build 0.2.0 · 15 November 2026. This file records how this build maps to
 | Kite MCP as a platform data source | The hosted server requires MCP OAuth; implemented with PKCE and dynamic registration. **Verified live (0.5.0):** session status, holdings, instrument search, daily candles and LTP. The server exposes mode-based tools (`portfolio`, `market`, `session`, `orders`, `gtt`, `alerts`…); the read-only policy is a (tool, mode) allowlist, so orders, GTT, alerts and logout are refused in code. Kite sessions end daily around 6 AM, so reconnect each morning |
 | Extension 0.5.0 | Background worker with a 1-minute heartbeat and opt-in auto-fetch. The platform shows install/connection state. "Fetch now" from the local page goes through `externally_connectable`, restricted to loopback origins. Manifest validated with Chrome's packer |
 
+## Added in 0.6.0: Newsdesk (from references_news, 22 Nov 2026)
+
+Ported into `ca_platform/newsdesk/`, with these changes to the original. Each fixes a spec conflict found in the review.
+
+| Original Newsdesk | In the platform | Why |
+|---|---|---|
+| BSE API with browser-spoofed headers | NSE announcements + PDFs with an honest UA; BSE not used | Spec §6: identify the client, don't evade access controls (BSE returns Access Denied to honest clients) |
+| Missing dates become "now" | Stay `None` | Spec §6 point-in-time |
+| Confidence = noisy-OR over all outlets | One story per wording cluster; small capped bonus per independent story | Repeated coverage is not confirmation (spec §6/§7) |
+| "Confirmed" if any filing is on the event | Only a same-metric filed figure within 5%; otherwise `filing_on_event` | Spec cross-check rule 6 |
+| Any two ₹ amounts compared | Amounts tagged with the nearest metric keyword | Order value ≠ revenue |
+| Denial = keyword in any filing | Only a clarification filing | Fewer false denials |
+| Separate SQLite app, port and token | Same ledger, service, token and UI | One system, one audit trail |
+| Live dossier re-built under the brains | Snapshotted into the frozen bundle | Same news for every brain |
+| `[n]` citations + figure check | Our verbatim-quote citations; Newsdesk statuses as computed summary passages | Stronger accountability |
+| Separate extension, auto-captures every Prime page, reads JSON-LD | Ours kept; ported density body detection, load retries and an **opt-in** "capture pages I open" | Spec §7: user-selected, no hidden JSON |
+
+Not ported (yet): learned source trust (shown in config only), LLM labelling, alerts, multi-vendor news brains (the spec splits brains by job, not vendor).
+
 ## Deliberate refinements (please confirm)
 
 1. **Rejecting an objection requires a verified quote.** If the Head rejects a Critic objection, code downgrades it to `unresolved` unless the rejection cites a passage whose quote is found verbatim. The spec says "a rhetorical reply is not a passed test"; this is the strict, code-checkable version.

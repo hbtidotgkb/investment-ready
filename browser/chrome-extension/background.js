@@ -161,7 +161,44 @@ async function fetchQueue(s, manual) {
   return { done, failed };
 }
 
+/* ---------- opt-in: capture ET articles you open (content script registered only when enabled) ---------- */
+async function syncAutoCapture() {
+  const { autoCaptureOnVisit } = await chrome.storage.local.get('autoCaptureOnVisit');
+  const allowed = await chrome.permissions.contains({ origins: [ET_ORIGIN] });
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: ['ca-autocapture'] }).catch(() => []);
+  if (autoCaptureOnVisit && allowed && !existing.length) {
+    await chrome.scripting.registerContentScripts([{ id: 'ca-autocapture', matches: ['https://economictimes.indiatimes.com/*'],
+      js: ['extractor.js', 'autocapture.js'], runAt: 'document_idle', persistAcrossSessions: true }]).catch(() => {});
+  } else if ((!autoCaptureOnVisit || !allowed) && existing.length) {
+    await chrome.scripting.unregisterContentScripts({ ids: ['ca-autocapture'] }).catch(() => {});
+  }
+}
+chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.autoCaptureOnVisit) syncAutoCapture(); });
+chrome.permissions.onAdded.addListener(syncAutoCapture);
+chrome.permissions.onRemoved.addListener(syncAutoCapture);
+chrome.runtime.onStartup.addListener(syncAutoCapture);
+chrome.runtime.onInstalled.addListener(syncAutoCapture);
+
+async function autoCapture(r) {
+  const s = await settings();
+  if (!s.tok || !s.attest) { await badge('!', '#c0302f'); return; }
+  const { autoSent = [] } = await chrome.storage.session.get('autoSent');
+  if (autoSent.includes(r.url)) return;
+  try {
+    const rec = await call(s, '/v1/research/captures', { method: 'POST', body: JSON.stringify(payload(r, { queue_id: null }, s, 'rs-visit-' + new Date().toISOString().slice(0, 10))) });
+    const one = rec.items[0] || {};
+    await chrome.storage.session.set({ autoSent: [...autoSent.slice(-200), r.url] });
+    const log = (await chrome.storage.session.get('visitLog')).visitLog || [];
+    log.push({ t: Date.now(), title: r.title, status: one.status, companies: (one.companies && one.companies.resolved || []).map((c) => c.symbol) });
+    await chrome.storage.session.set({ visitLog: log.slice(-25) });
+    await badge('✓', '#0a7d3c');
+    setTimeout(() => badge('', '#2a78d6'), 4000);
+  } catch (e) { await badge('!', '#c0302f'); }
+}
+
 chrome.runtime.onMessage.addListener((m, _sender, reply) => {
+  if (m && m.type === 'autoCapture') { autoCapture(m.result); return false; }
+  if (m && m.type === 'autoCaptureShort') { badge('?', '#9a6400'); return false; }
   if (m && m.type === 'fetchNow') { settings().then((s) => fetchQueue(s, true)).then(reply); return true; }
   if (m && m.type === 'stop') { cancelRequested = true; reply({ ok: true }); }
   if (m && m.type === 'poll') { poll(false).then(reply); return true; }

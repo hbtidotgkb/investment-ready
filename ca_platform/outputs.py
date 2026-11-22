@@ -7,7 +7,7 @@ from datetime import datetime
 
 from .settings import REPORTS, config
 
-EXCLUDE_FROM_RANKING = {"price_series", "computed_feature", "chart_pattern", "company_profile"}
+EXCLUDE_FROM_RANKING = {"price_series", "computed_feature", "chart_pattern", "company_profile", "news_summary"}
 
 
 def rank_sources(bundle, dr: dict, idx, limit: int = 10) -> list[dict]:
