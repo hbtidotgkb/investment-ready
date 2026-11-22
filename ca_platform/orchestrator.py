@@ -181,6 +181,7 @@ def _issue(led, run_id: str, dr: dict) -> None:
 async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decision_at, loop, loops, carry, gw_live):
     fac = EvidenceFactory()
     nd_info: dict = {}
+    fin_info: dict = {}
     flags: list[str] = []
     today = date.fromisoformat(decision_at[:10])
     asked = carry.get("open_questions", []) if carry else []
@@ -335,6 +336,29 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 ev.log("filings", "NSE ASM/GSM lists unavailable — surveillance status unknown")
         finally:
             s.close()
+        # Official financials: results + shareholding XBRL filings (point in time), ratios computed in code.
+        from .data import nse_xbrl
+        from .features import fundamentals as fund_mod
+        x_facts: list = []
+        try:
+            snap = await asyncio.to_thread(nse_xbrl.collect, symbol, decision_at,
+                                           lambda m: ev.log("filings", f"Filed financials · {m}"))
+            fund = fund_mod.build(snap, feats.get("close"))
+            x_facts, x_calcs, fin_info = fund_mod.to_evidence(fac, snap, fund, company)
+            calcs += x_calcs
+            for f_ in snap["failed"]:
+                ev.log("filings", f"Filed financials: {f_}")
+                flags.append(f"Filed financials: {f_}")
+            for f_ in fund["flags"]:
+                ev.log("filings", f"Filed financials flag: {f_}")
+                flags.append(f_)
+            got = {m["name"]: m["value"] for m in fund["metrics"] if m["value"] is not None}
+            ev.log("filings", "Filed financials: " + (", ".join(
+                f"{k} {got[k]:,.2f}" for k in ("pe_ttm", "pb", "roe_pct", "gnpa_pct", "cet1_pct") if k in got) or "no ratios computed")
+                   + f" · audit opinion {fund['audit']['status']} · {len(x_facts)} typed facts")
+        except Exception as e:
+            ev.log("filings", f"Filed financials unavailable ({type(e).__name__}: {str(e)[:120]}) — Forensic/Quant will see the gap")
+            flags.append("Filed financials (NSE XBRL) unavailable for this run")
         from .newsdesk import pipeline as nd_pipeline
         if nd_pipeline.is_fresh(symbol):
             ev.log("filings", "Newsdesk: data is fresh (kept current by the background worker) — no refetch")
@@ -354,7 +378,13 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                 surveillance = msurv
             ev.log("filings", f"Manual facts file: {len(facts)} typed facts ({sum(f.verified for f in facts)} user-verified from T1)")
         else:
-            ev.log("filings", f"No data/manual/{symbol}.yaml — financial facts missing (Forensic will report coverage gaps)")
+            ev.log("filings", f"No data/manual/{symbol}.yaml (optional — filed figures come from NSE XBRL)")
+        if x_facts:
+            manual_keys = {(f.metric, f.period_end) for f in facts}
+            overridden = [f for f in x_facts if (f.metric, f.period_end) in manual_keys]
+            if overridden:
+                ev.log("filings", f"Manual facts override {len(overridden)} filed value(s) for the same metric and period")
+            facts = facts + [f for f in x_facts if (f.metric, f.period_end) not in manual_keys]
         if gw_live.available:
             try:
                 sys_p, _ = system_prompt("discovery")
@@ -666,6 +696,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "fallback_events": getattr(gw, "fallback_events", []),
         "asked_questions": asked,
         "newsdesk": nd_info,
+        "fundamentals": fin_info,
         "evaluation_contract": {"id": None, "horizon": horizon, **config("horizons")["evaluation"],
                                 "benchmark_assumption": config("rules")["benchmark"], "frozen_at": iso()},
         "versions": b.versions | {"prompts": {r: config("models")["roles"][r]["prompt"] for r in PANEL_ROLES},

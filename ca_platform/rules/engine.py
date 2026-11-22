@@ -87,14 +87,37 @@ def preflight(bundle: Bundle) -> list[dict]:
     out.append(_r("data_quality", BLOCKED if ca_flags else PASS,
                   "; ".join(ca_flags) if ca_flags else "No unresolved corporate-action or material data conflicts flagged."))
 
-    pledge = _fact(bundle, "promoter_pledge_pct")
-    if pledge is None:
-        out.append(_r("pledge", UNKNOWN, "Promoter pledge not in bundle; Forensic review must establish it."))
-    else:
-        th = rc["pledge"]["max_pct_of_promoter"]
-        out.append(_r("pledge", PASS if pledge.value <= th else BLOCKED,
-                      f"Promoter pledge {pledge.value}% of promoter holding vs max {th}%", [pledge.evidence_id], pledge.value))
+    out.append(pledge_rule(bundle, rc["pledge"]))
     return out
+
+
+def pledge_rule(bundle: Bundle, rc: dict) -> dict:
+    """Level and trend from the filed shareholding series (latest first). Manual facts win ties."""
+    pf = [f for f in bundle.facts if f.metric == "promoter_pledge_pct" and f.status in ("available", "not_applicable")]
+    pf.sort(key=lambda f: f.period_end or "", reverse=True)
+    if not pf:
+        return _r("pledge", UNKNOWN, "Promoter pledge not in bundle; Forensic review must establish it.")
+    latest = pf[0]
+    if latest.status == "not_applicable":
+        return _r("pledge", PASS, f"No promoter group reported as of {latest.period_end} — promoter pledge not applicable.",
+                  [latest.evidence_id])
+    series = [f for f in pf if f.status == "available" and f.value is not None]
+    th, need = rc["max_pct_of_promoter"], rc.get("rising_quarters", 2)
+    rising = 0
+    while rising + 1 < len(series) and series[rising].value > series[rising + 1].value:
+        rising += 1
+    trend = ", ".join(f"{f.period_end}: {f.value:.2f}%" for f in series[:4])
+    refs = [f.evidence_id for f in series[:4] if f.evidence_id]
+    if latest.value > th:
+        return _r("pledge", BLOCKED, f"Promoter pledge {latest.value:.2f}% of promoter holding vs max {th}% ({trend})", refs, latest.value)
+    if latest.value > 0 and rising >= need:
+        return _r("pledge", BLOCKED, f"Promoter pledge rising for {rising} consecutive quarters ({trend}); limit is {need}", refs, latest.value)
+    return _r("pledge", PASS, f"Promoter pledge {latest.value:.2f}% of promoter holding vs max {th}%"
+              + (f" ({trend})" if len(series) > 1 else ""), refs, latest.value)
+
+
+def _months_between(d0: str, d1: str) -> float:
+    return (date.fromisoformat(d1[:10]) - date.fromisoformat(d0[:10])).days / 30.44
 
 
 # ---------------------------------------------------------- governance rubric ---
@@ -197,10 +220,21 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
 
     fc = {c["name"]: c for c in panel.get("forensic_checks", [])}
     aud = fc.get("auditor")
-    if aud is None or aud["result"] == "insufficient_evidence":
-        results.append(_r("audit", UNKNOWN, "Auditor opinion not established — missing auditor evidence is not a clean audit."))
+    lb = rc["vetoes"]["audit"]["lookback_months"]
+    xa = next((f for f in bundle.facts if f.metric == "audit_opinion_unmodified" and f.status == "available"
+               and f.value is not None and f.period_end
+               and _months_between(f.period_end, bundle.decision_at) <= lb + 3), None)   # +3: filing lag after period end
+    if aud is not None and aud["result"] == "fail":
+        results.append(_r("audit", BLOCKED, f"Forensic auditor check: fail — {aud['note']}"))
+    elif xa is not None and xa.value == 0:
+        results.append(_r("audit", BLOCKED, f"Filed audit opinion is modified: {xa.reason}", [xa.evidence_id]))
+    elif aud is not None and aud["result"] in ("pass", "watch"):
+        results.append(_r("audit", PASS, f"Forensic auditor check: {aud['result']} — {aud['note']}"
+                          + (f" (filed: {xa.reason})" if xa is not None else "")))
+    elif xa is not None:
+        results.append(_r("audit", PASS, f"Filed audit opinion: {xa.reason}", [xa.evidence_id]))
     else:
-        results.append(_r("audit", BLOCKED if aud["result"] == "fail" else PASS, f"Forensic auditor check: {aud['result']} — {aud['note']}"))
+        results.append(_r("audit", UNKNOWN, "Auditor opinion not established — missing auditor evidence is not a clean audit."))
 
     pre_pledge = next((r for r in pre if r["rule"] == "pledge"), None)
     pl = fc.get("promoter_pledge_insider")

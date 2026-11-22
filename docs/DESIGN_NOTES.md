@@ -79,9 +79,30 @@ Not ported (yet): learned source trust (shown in config only), LLM labelling, al
 
 1. **Vendor separation.** All roles default to Anthropic. Since 0.3.0 you can move any role, e.g. the Critic, to OpenAI from System → Models; the decision record shows `separated`, `partial` or `degraded`. OpenAI models are not hard-coded: the list comes live from your key. Fallbacks across providers are not automatic.
 2. **ET Prime rights.** The extension captures only what you can already read and records your personal-research attestation, but ET's terms on extraction, AI processing and retention remain unresolved (spec §7, §16). The attestation records your decision; it does not settle the legal question. Unattested captures are stored but never sent to a model.
-3. **Fundamentals are the weakest link.** Until XBRL ingestion exists, Forensic coverage depends on the manual facts file, and results found by web search are attributed claims, not verified facts. Expect `insufficient_data` / research-only outcomes for most live runs at first. That is the design working, not a bug.
+3. **Fundamentals: now filed data, with known gaps.** Since 0.7.0, results and shareholding come from the company's NSE XBRL filings (see below). Still missing: insider trades (NSE's feed stopped in Mar-2025), contingent liabilities, slippages/restructuring and CWIP detail (annual-report / investor-presentation items). No sector or own-history multiples yet, so Quant can say what a P/E *requires*, not whether it is cheap versus history.
 4. **Tax values are as of the July 2024 changes** (STCG 20%, LTCG 12.5% above ₹1.25 lakh, plus cess). Budgets since then may have changed them. Verify before marking the file verified.
 5. **Cost.** A live run makes about 8 Claude Opus 5.5 calls plus up to 9 web searches. All roles default to `claude-opus-5-5`; you can move the brains to `claude-sonnet-5-5` in `config/models.yaml` to cut cost. The monthly cap (`config/user.yaml`) is enforced before each run.
 6. **Kite Connect historical data is paid** (₹500/month per app, per the spec's check; verify current terms). Without it, prices come from NSE bhavcopy: end-of-day, unadjusted, with a ~5 minute one-time backfill.
 7. **NSE endpoints change.** Announcements and the ASM/GSM lists work today. If NSE starts refusing them, the run says so and surveillance becomes `unknown`, which blocks buys. A source can also be recorded manually in the facts file.
 8. **The original skill's scripts and the 0.1.1 extension were not in this repo.** If you have them, we should reconcile the re-implemented features, patterns and allocation against them and port their tests.
+
+
+## 0.7.0 — Filed financials (NSE XBRL)
+
+Finding: NSE's `results-comparision` and `corporates-financial-results` JSON stop at **Dec-2024**. Results since then are SEBI **Integrated Filing — Financials**, published as XBRL on nsearchives. The pledge endpoint returns empty even for companies with pledges, and the insider (PIT) feed has nothing after Mar-2025. So:
+
+| Data | Source used | Notes |
+|---|---|---|
+| Quarterly P&L, EPS, balance sheet (half-yearly), YTD cash flow | Integrated Filing XBRL, last 5 quarters | Consolidated for companies, standalone for banks (regulatory ratios) |
+| Bank asset quality: GNPA/NNPA %, GNPA amount, CET-1, RoA | Same XBRL (banking format) | PCR is approximate: net NPA amount derived from the rounded %, labelled so |
+| Audit opinion, auditors, related-party totals | Same XBRL | Only an **audited** filing's declaration feeds the audit rule; auditor names normalised before change detection |
+| Promoter holding, pledge, FPI/DII/MF | Shareholding-pattern XBRL, last 4 quarters | Pledge % of promoter holding computed from share counts |
+| Insider trades | — | Reported as unavailable, not shown as current |
+
+- Point in time: only filings broadcast before the decision time; a later revision replaces the original only after it was filed.
+- Ratios (`fundamentals@1`, code): TTM EPS, P/E, earnings yield, P/B, book value, ROE, YoY growth, other-income share, effective tax, exceptional-item frequency, OCF/profit, receivable days, D/E, dilution; banks: PCR, deposit/advance growth. Each line names its formula and the filing evidence ids. Missing quarter / negative EPS → "not computed" with a reason.
+- A filed value is `verified` only when the filing's own arithmetic reconciles (income = revenue + other income; PBT − tax = profit).
+- Rules: pledge now uses the filed series (not applicable without a promoter group; blocks above 10% or when rising 2 quarters, the existing `rising_quarters` setting). Audit passes on a filed unmodified opinion within the lookback and blocks on a modified one; a Forensic "fail" still blocks.
+- Manual facts win a tie (same metric and period).
+- Prompts: `quant@2.1.0` (use the computed valuation lines; no imported multiples), `forensic@2.1.0` (check → evidence map; insider part unverified).
+- UI: run **Numbers** tab + valuation box on Overview. CLI: `ca fundamentals SYMBOL [--price X]`; API `/api/fundamentals/{symbol}`.

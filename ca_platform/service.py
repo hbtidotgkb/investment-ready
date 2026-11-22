@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -455,6 +457,15 @@ async def nd_dossier_get(symbol: str, days: int = 90, refresh: str = "auto", wai
     d = await asyncio.to_thread(dossier.build, sym, days)
     p = progress.get(sym)
     return d | {"refreshing": p["running"], "never_fetched": never and p["running"], "progress": progress.public(p)}
+
+
+@app.get("/api/fundamentals/{symbol}")
+async def fundamentals_get(symbol: str, price: Optional[float] = None):
+    """Filed financials on their own (NSE XBRL, computed ratios). Not saved; a run freezes its own copy."""
+    from .features import fundamentals
+    if not re.fullmatch(r"[A-Za-z0-9&\-]{1,20}", symbol) or (price is not None and price <= 0):
+        raise HTTPException(400, "bad symbol or price")
+    return await asyncio.to_thread(fundamentals.report, symbol, price)
 
 
 @app.get("/api/newsdesk/progress/{symbol}")

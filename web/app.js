@@ -366,7 +366,7 @@ function renderResults() {
     </div></div></div>
   ${topSourcesCard(dr)}
   <div class="card">${loops.length > 1 ? `<div class="row" style="margin-bottom:8px"><span class="small muted">Showing details for</span><div class="seg" id="rl">${loops.map((l) => `<button data-l="${l.loop}" class="${l.loop === currentLoopNo() ? 'on' : ''}">Loop ${l.loop}${l.loop === loops.length ? ' (final)' : ''}</button>`).join('')}</div></div>` : ''}
-  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['news', `News${dr.newsdesk && dr.newsdesk.dossier ? ` (${dr.newsdesk.dossier.events.length})` : ''}`], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
+  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['news', `News${dr.newsdesk && dr.newsdesk.dossier ? ` (${dr.newsdesk.dossier.events.length})` : ''}`], ['numbers', 'Numbers'], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
   $('#tabs').onclick = (e) => { const t = e.target.dataset.t; if (t) { RUN.tab = t; $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t === t)); renderTab(); } };
   const rl = $('#rl'); if (rl) rl.onclick = (e) => { const l = e.target.dataset.l; if (l) { RUN.resultLoop = Number(l); renderResults(); } };
   const ts = $('#topn'); if (ts) ts.onclick = (e) => { const n = e.target.dataset.n; if (n) { store.set('ca-topn', Number(n)); renderResults(); } };
@@ -408,7 +408,7 @@ function topSourcesCard(dr) {
 
 function renderTab() {
   const dr = currentRecord(), b = currentBundle(dr), el = $('#tab-body');
-  const T = { overview: tabOverview, news: tabNews, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
+  const T = { overview: tabOverview, news: tabNews, numbers: tabNumbers, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
   el.innerHTML = T(dr, b);
   if (RUN.tab === 'overview') drawChart(dr, b);
   if (RUN.tab === 'sources') bindSourceFilter();
@@ -423,10 +423,47 @@ function tabOverview(dr, b) {
       <div><span>Close</span><b>${fmt(f.close)}</b></div><div><span>SMA 200</span><b>${fmt(f.sma200)}</b></div><div><span>RSI 14</span><b>${fmt(f.rsi14, 1)}</b></div>
       <div><span>ATR 14</span><b>${fmt(f.atr14)}</b></div><div><span>52w high</span><b>${fmt(f.high_52w)}</b></div><div><span>52w low</span><b>${fmt(f.low_52w)}</b></div>
       <div><span>ADV20 (₹ cr)</span><b>${fmt(f.adv20_crore)}</b></div><div><span>3m return</span><b>${fmt(f.ret_3m_pct, 1)}%</b></div></div>
+      <h4 style="margin-top:16px">Valuation (from filings)</h4><div class="kv">
+      <div><span>P/E (TTM)</span><b>${f.pe_ttm == null ? '—' : fmt(f.pe_ttm, 1) + 'x'}</b></div><div><span>P/B</span><b>${f.pb == null ? '—' : fmt(f.pb, 1) + 'x'}</b></div>
+      <div><span>EPS TTM</span><b>${fmt(f.eps_ttm)}</b></div><div><span>ROE</span><b>${f.roe_pct == null ? '—' : fmt(f.roe_pct, 1) + '%'}</b></div></div>
+      <p class="small muted">Computed in code from the company's XBRL filings — see the Numbers tab for formulas and sources.</p>
       <h4 style="margin-top:16px">Chart patterns</h4>${(b.patterns || []).length ? b.patterns.map((p) => `<div class="small"><b>${esc(titleCase(p.name))}</b> <span class="pill ${p.status === 'confirmed' ? (p.bias === 'bullish' ? 'good' : 'bad') : ''}">${esc(p.status)}</span> neckline ${fmt(p.neckline)} · target ${fmt(p.measured_target)} · stop ${fmt(p.pattern_stop)}</div>`).join('') : '<div class="muted small">None detected.</div>'}
       <h4 style="margin-top:16px">Evidence coverage</h4><div class="row">${Object.entries(b.coverage || {}).map(([k, v]) => `<span class="pill ${['available', 'not_listed'].includes(v) || v > 0 ? 'good' : ['missing', 'unknown', 0].includes(v) ? 'warn' : ''}">${esc(titleCase(k))}: ${esc(v)}</span>`).join('')}</div>
       ${(b.quality_flags || []).length ? `<h4 style="margin-top:16px">Quality flags</h4><ul class="small">${b.quality_flags.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
       ${(dr.learn || []).length ? `<h4 style="margin-top:16px">Learn</h4>${dr.learn.map((l) => `<span class="pill info">${esc(titleCase(l))}</span> `).join('')}` : ''}
+    </div></div>`;
+}
+
+// Filed financials the panel received: every value links to the frozen filing evidence.
+function tabNumbers(dr) {
+  const fi = dr.fundamentals || {};
+  if (!fi.metrics) {
+    return dr.mode === 'demo' ? '<div class="empty">DEMO runs use a synthetic facts file, not filed data. Run in Live mode to see filed numbers here.</div>'
+      : '<div class="empty">This run has no filed-financials snapshot (it ran before this was recorded, or NSE was unavailable — see the progress log).</div>';
+  }
+  const ev = (id) => id ? `<span class="cite verified" data-ev="${esc(id)}" data-pid="" data-q="" data-st="source" title="open the filing as frozen in this run">${esc(id)}</span>` : '';
+  const val = (m) => m.value == null ? `<span class="muted">not computed</span>` : m.unit === 'count' ? String(Math.round(m.value))
+    : m.unit === 'x' ? fmt(m.value, 2) + 'x' : m.unit === '%' ? fmt(m.value, 2) + '%' : `${fmt(m.value, 2)} <span class="muted small">${esc(m.unit)}</span>`;
+  const au = fi.audit || {};
+  return `<div class="notice info">Figures the panel received, read by code from the company's own <b>XBRL filings on NSE</b> (${esc(fi.scope || '—')}${fi.is_bank ? ', bank format' : ''}), as of ${dt(fi.as_of)}. Ratios are arithmetic on those filings (${esc(fi.code_version)}); nothing is estimated. Click an id to open the filing exactly as frozen into this run.</div>
+    ${(fi.flags || []).concat(fi.failed || []).length ? `<div class="notice bad" style="margin-top:10px">${(fi.flags || []).concat(fi.failed || []).map(esc).join('<br>')}</div>` : ''}
+    <div class="grid g2" style="margin-top:12px"><div><h3>Ratios</h3><div class="tbl-wrap"><table><thead><tr><th>Metric</th><th>Value</th><th>How</th></tr></thead><tbody>
+      ${fi.metrics.map((m) => `<tr><td class="small">${esc(m.label)}</td><td><b>${val(m)}</b></td><td class="small muted">${esc(m.formula || '')}${m.note ? ` <i>(${esc(m.note)})</i>` : ''} ${(m.evidence_ids || []).map(ev).join('')}</td></tr>`).join('')}
+      ${fi.computed_evidence_id ? `<tr><td colspan="3" class="small muted">All ratio lines as given to the brains: ${ev(fi.computed_evidence_id)}</td></tr>` : ''}
+    </tbody></table></div></div>
+    <div><h3>Quarters read</h3><div class="tbl-wrap"><table><thead><tr><th>Quarter ended</th><th>${fi.is_bank ? 'Total income' : 'Revenue'} (₹ cr)</th><th>Profit (₹ cr)</th><th>EPS</th>${fi.is_bank ? '<th>GNPA / NNPA</th>' : ''}<th>Status</th></tr></thead><tbody>
+      ${(fi.quarters || []).map((q) => `<tr><td class="small">${esc(q.period_end)}<div class="muted">filed ${esc(q.filed)}</div></td><td>${fmt(q.revenue_cr, 0)}</td><td>${fmt(q.pat_cr, 0)}</td><td>${fmt(q.eps)}</td>
+        ${fi.is_bank ? `<td class="small">${fmt(q.gnpa_pct)}% / ${fmt(q.nnpa_pct)}%</td>` : ''}
+        <td class="small">${esc(q.audited || '')} ${q.reconciled === false ? '<span class="pill bad">does not reconcile</span>' : q.reconciled ? '<span class="pill good">reconciles</span>' : ''} ${ev(q.evidence_id)} <a href="${esc(q.url)}" target="_blank" rel="noopener noreferrer">filing ↗</a></td></tr>`).join('')}
+    </tbody></table></div>
+    <h3 style="margin-top:14px">Shareholding</h3><div class="tbl-wrap"><table><thead><tr><th>As of</th><th>Promoter</th><th>Pledged (of promoter)</th><th>FPI</th><th>DII</th><th>MF</th></tr></thead><tbody>
+      ${(fi.shareholding || []).map((s) => `<tr><td class="small">${esc(s.date)}</td><td>${fmt(s.promoter_pct)}%</td><td>${s.has_promoter ? fmt(s.pledge_pct_of_promoter) + '%' : '<span class="muted">no promoter</span>'}</td><td>${fmt(s.fpi_pct)}%</td><td>${fmt(s.dii_pct)}%</td><td>${fmt(s.mf_pct)}%</td></tr>`).join('') || '<tr><td colspan="6" class="muted small">Not available.</td></tr>'}
+    </tbody></table></div>
+    <h3 style="margin-top:14px">Audit and governance inputs</h3>
+    <div class="small"><span class="pill ${au.status === 'unmodified' ? 'good' : au.status === 'modified' ? 'bad' : 'warn'}">audit opinion: ${esc(au.status || 'unknown')}</span> ${esc(au.detail || '')}</div>
+    <div class="small">Auditors: ${esc((fi.auditors || []).join(', ') || '—')}</div>
+    ${fi.rpt ? `<div class="small">Related-party transactions in the latest quarter: ${fi.rpt.rows} line items, ₹${fmt(fi.rpt.amount_cr, 0)} cr gross (all types — judge materiality, not count).</div>` : ''}
+    <div class="small"><span class="pill warn">insider trades: ${esc((fi.insider_trades || {}).status || 'unknown')}</span> ${esc((fi.insider_trades || {}).reason || '')}</div>
     </div></div>`;
 }
 

@@ -47,7 +47,10 @@ def technical_passages(f: dict, source: str) -> list[str]:
         f"SMA20 Rs {fmt(f['sma20'])}, SMA50 Rs {fmt(f['sma50'])}, SMA200 Rs {fmt(f['sma200'])}; close is {above} SMA200.",
         f"RSI(14) is {fmt(f['rsi14'], 1)}; MACD {fmt(f['macd'])} versus signal {fmt(f['macd_signal'])}.",
         f"ATR(14) is Rs {fmt(f['atr14'])}, which is {fmt(f['atr_pct'], 1)}% of the last close.",
-        f"52-week high Rs {fmt(f['high_52w'])} and low Rs {fmt(f['low_52w'])}; close is {fmt(f['pct_from_52w_high'], 1)}% from the 52-week high.",
+        (f"52-week high Rs {fmt(f['high_52w'])} and low Rs {fmt(f['low_52w'])}" if f.get("range_bars", 252) >= 250 else
+         f"High Rs {fmt(f['high_52w'])} and low Rs {fmt(f['low_52w'])} over only {f.get('range_bars')} bars (less than 52 weeks of data)")
+        + f"; close is {fmt(f['pct_from_52w_high'], 1)}% from the high and {fmt(f.get('pct_above_52w_low'), 1)}% above the low"
+        + (f" ({fmt(f['pos_in_52w_range_pct'], 0)}% of the way from low to high)." if f.get("pos_in_52w_range_pct") is not None else "."),
         f"20-day average traded value is Rs {fmt(f['adv20_crore'])} crore.",
         f"Price returns: 1 month {fmt(f['ret_1m_pct'], 1)}%, 3 months {fmt(f['ret_3m_pct'], 1)}%, 6 months {fmt(f['ret_6m_pct'], 1)}%.",
         (f"Nearest support zone Rs {fmt(sup['level'])} ({sup['touches']} touches)" if sup else "No support zone below the last close in 180 bars")

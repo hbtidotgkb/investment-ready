@@ -57,6 +57,8 @@ The run page has a **tab per loop** with its own progress tracker, plus a **"Wha
 
 `ca_platform/newsdesk/`, adapted from `references_news/` into the platform. It collects each stock's news, merges articles about the same event, checks press claims against filings, and ranks events. You can use it on its own from the **Newsdesk** page or with `ca news check|dossier|quality SYMBOL`. Every analysis also freezes a Newsdesk dossier into its evidence bundle.
 
+**Filed financials** (`ca_platform/data/nse_xbrl.py`, `ca_platform/features/fundamentals.py`) read each company's results and shareholding XBRL filings from NSE and compute P/E, P/B, ROE, growth, cash conversion, pledge and (for banks) NPA, PCR and CET-1 in code, each with its formula and source filing. Check a stock on its own with `ca fundamentals SYMBOL`; every run shows them in the **Numbers** tab.
+
 - **Sources:**
   - NSE corporate announcements, with the **filed PDF read for figures** (official tier). NSE's archive serves them to an honest client; BSE's API refuses one, so BSE isn't used.
   - Google News search, credited to the real publisher. **Only publishers in the source registry are used**; the rest are kept on record and set aside.

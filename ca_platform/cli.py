@@ -169,6 +169,40 @@ def cmd_news(a):
         print(f"Not yet known: {x}")
 
 
+def cmd_fundamentals(a):
+    """Filed financials on their own: NSE XBRL results + shareholding, ratios computed in code."""
+    sym = a.symbol.upper()
+    if _ledger_locked():
+        with _server() as c:
+            r = c.get(f"/api/fundamentals/{sym}", params={"price": a.price} if a.price else None, timeout=600)
+            if r.status_code != 200:
+                print(r.text)
+                sys.exit(1)
+            d = r.json()
+    else:
+        from .features import fundamentals
+        d = fundamentals.report(sym, a.price, lambda m: print("  " + m))
+    print(f"\n{sym} · {d['scope'] or 'n/a'} figures{' (bank format)' if d['is_bank'] else ''} · price: "
+          f"{d['price']['close'] or 'n/a'} ({d['price']['note']}) · {d['code_version']}")
+    for q in d["quarters"]:
+        print(f"  Q ended {q['period_end']} · filed {q['filed']} · {q['audited']} · revenue {q['revenue_cr'] or 0:,.0f} cr · "
+              f"profit {q['pat_cr'] or 0:,.0f} cr · EPS {q['eps']} · reconciles: {q['reconciled']}  [{q['evidence_id']}]")
+    print()
+    for m in d["metrics"]:
+        v = "—" if m["value"] is None else (f"{int(m['value'])}" if m["unit"] == "count" else f"{m['value']:,.2f}")
+        print(f"  {m['label'][:62]:<62} {v:>14} {m['unit'] if m['value'] is not None else '':<10}"
+              + (f" ({m['note']})" if m.get("note") else ""))
+    for s_ in d["shareholding"][:4]:
+        pl = "n/a (no promoter)" if not s_["has_promoter"] else f"{s_['pledge_pct_of_promoter']:.2f}% of promoter"
+        print(f"  Shareholding {s_['date']}: promoter {s_['promoter_pct']:.2f}% · pledged {pl} · FPI {s_['fpi_pct'] or 0:.2f}% · "
+              f"DII {s_['dii_pct'] or 0:.2f}% · MF {s_['mf_pct'] or 0:.2f}%")
+    print(f"\n  Audit opinion: {d['audit']['status']} — {d['audit']['detail']}")
+    print(f"  Auditors: {', '.join(d['auditors']) or 'n/a'}")
+    print(f"  Insider trades: {d['insider_trades']['status']} — {d['insider_trades']['reason']}")
+    for x in d["flags"] + d["failed"] + d["notes"]:
+        print(f"  ! {x}")
+
+
 def cmd_health(a):
     if _ledger_locked():
         with _server() as c:
@@ -209,6 +243,10 @@ def main(argv=None):
     s.add_argument("symbol")
     s.add_argument("--days", type=int, default=90)
     s.set_defaults(fn=cmd_news)
+    s = sub.add_parser("fundamentals", help="Filed financials on their own: XBRL results, shareholding, P/E, P/B, ROE…")
+    s.add_argument("symbol")
+    s.add_argument("--price", type=float, help="Price for P/E and P/B (default: last bhavcopy close)")
+    s.set_defaults(fn=cmd_fundamentals)
     s = sub.add_parser("health", help="Show configuration and connection status")
     s.set_defaults(fn=cmd_health)
     a = p.parse_args(argv)

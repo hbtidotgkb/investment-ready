@@ -42,11 +42,11 @@ def system_prompt(role: str) -> tuple[str, str]:
 
 ROLE_KINDS = {
     "quant": {"price_series", "computed_feature", "chart_pattern", "manual_fact", "exchange_filing", "company_profile",
-              "news_summary", "exchange_announcement"},
+              "news_summary", "exchange_announcement", "computed_fundamental"},
     "news": {"news_article", "web_search_citation", "exchange_announcement", "browser_capture", "pdf",
              "company_profile", "computed_feature", "news_summary"},
     "forensic": {"exchange_filing", "manual_fact", "exchange_announcement", "company_profile", "web_search_citation",
-                 "news_summary", "news_article", "browser_capture"},
+                 "news_summary", "news_article", "browser_capture", "computed_fundamental"},
 }
 # Newsdesk items carry retrieved_via "newsdesk:<source>:<event_type>"; narrow them per remit.
 FORENSIC_PRESS_TYPES = ("governance_flag", "accounting_concern", "regulatory_action", "insider_pledge", "litigation")
