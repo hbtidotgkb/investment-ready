@@ -100,11 +100,19 @@ def nse_filings(symbol: str, log=lambda m: None) -> list[RawItem]:
     s = nse.NSESession()
     out: list[RawItem] = []
     try:
+        log("NSE announcements: requesting…")
         anns = s.announcements(symbol, days=int(cfg.get("days", 90)))
         if anns is None:
-            log("NSE announcements unavailable")
+            log("NSE announcements unavailable (NSE refused or timed out)")
             return []
         pdf_budget = int(cfg.get("max_pdfs_per_refresh", 8)) if cfg.get("read_pdf", True) else 0
+        new_pdfs = [a for a in anns if (a.get("attchmntFile") or "").lower().endswith(".pdf")
+                    and not routine(a.get("desc") or "", a.get("desc"))
+                    and not (FILING_TEXT / (hashlib.sha256(a["attchmntFile"].strip().encode()).hexdigest()[:24] + ".txt")).exists()]
+        to_read = min(len(new_pdfs), pdf_budget)
+        log(f"NSE announcements: {len(anns)} found · {to_read} new filing PDF(s) to read this time"
+            + (f" ({len(new_pdfs) - to_read} more on later refreshes)" if len(new_pdfs) > to_read else ""))
+        read_n = 0
         client = PoliteClient(min_interval=1.0)
         try:
             for a in anns:
@@ -115,9 +123,13 @@ def nse_filings(symbol: str, log=lambda m: None) -> list[RawItem]:
                 body = subject
                 if url.lower().endswith(".pdf") and pdf_budget > 0 and not routine(title, cat):
                     cached = (FILING_TEXT / (hashlib.sha256(url.encode()).hexdigest()[:24] + ".txt")).exists()
+                    if not cached:
+                        read_n += 1
+                        log(f"Reading filing PDF {read_n} of {to_read}: {cat[:60]}")
                     text = pdf_text(client, url)
                     if not cached:
                         pdf_budget -= 1
+                        log(f"  {'read ' + format(len(text), ',') + ' characters' if text else 'no text layer (scanned or unreadable)'}")
                     if text:
                         body = f"{subject}\n\n{text}" if subject else text
                 out.append(RawItem("nse_filing", url, title, body, "NSE", "T1_official",
@@ -159,14 +171,14 @@ def press(entry: dict, days: int = 30, log=lambda m: None) -> list[RawItem]:
 
 def feeds(entry: dict, log=lambda m: None) -> list[RawItem]:
     names = (entry.get("aliases") or []) + (entry.get("link_only") or [])
-    c = PoliteClient(min_interval=0.5)
+    c = PoliteClient(min_interval=0.3, timeout=8.0)     # a hanging feed must not stall the refresh
     out = []
     try:
         for f in config("sources").get("rss_feeds", []):
             try:
                 feed = feedparser.parse(c.get(f["url"]).text)
-            except Exception:
-                log(f"{f['name']}: unavailable")
+            except Exception as ex:
+                log(f"{f['name']}: unavailable ({type(ex).__name__}) — skipped")
                 continue
             for e in feed.entries:
                 t = f"{e.get('title', '')} {e.get('summary', '')}"

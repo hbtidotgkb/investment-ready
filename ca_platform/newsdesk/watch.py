@@ -53,7 +53,8 @@ def upsert(entry: dict) -> dict:
     sym = entry["symbol"].upper().strip()
     if not sym or not re.fullmatch(r"[A-Z0-9&\-]{1,20}", sym):
         raise ValueError("symbol must be an NSE symbol")
-    clean = {"symbol": sym, "watch": bool(entry.get("watch", True)), "updated_at": iso()}
+    existing = next((r for r in _load() if r["symbol"] == sym), {})
+    clean = dict(existing) | {"symbol": sym, "watch": bool(entry.get("watch", True)), "updated_at": iso()}
     for k in ("name",):
         if entry.get(k):
             clean[k] = str(entry[k])[:120]
@@ -68,7 +69,14 @@ def upsert(entry: dict) -> dict:
 
 
 def remove(symbol: str) -> None:
-    _save([r for r in _load() if r["symbol"] != symbol.upper()])
+    """Stop watching (no background refresh). Custom names are kept, so re-adding restores them;
+    stored news stays in the ledger and is still used by analyses of this stock."""
+    rows = _load()
+    for r in rows:
+        if r["symbol"] == symbol.upper():
+            r["watch"] = False
+            r["updated_at"] = iso()
+    _save(rows)
 
 
 def salience(entry: dict, title: str, body: str = "", tagged: bool = False) -> float:

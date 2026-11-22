@@ -440,31 +440,27 @@ def nd_watch_remove(symbol: str):
 
 
 @app.get("/api/newsdesk/dossier/{symbol}")
-async def nd_dossier_get(symbol: str, days: int = 90, refresh: str = "auto"):
-    from .newsdesk import dossier, pipeline
+async def nd_dossier_get(symbol: str, days: int = 90, refresh: str = "auto", wait: bool = False):
+    """Returns at once; a needed refresh runs in the background with live progress
+    (/api/newsdesk/progress/{symbol}). `wait=true` (CLI) blocks until the refresh finishes."""
+    from .newsdesk import dossier, pipeline, progress
     if not 7 <= days <= 365 or refresh not in ("auto", "force", "no"):
         raise HTTPException(400, "days 7..365, refresh auto|force|no")
-    report, background = None, False
-    never = get_ledger().fetchone("SELECT 1 AS x FROM nd_state WHERE symbol=?", [symbol.upper()]) is None
-    if refresh == "force" or (refresh == "auto" and never):
-        report = await asyncio.to_thread(pipeline.refresh, symbol, lambda m: None, days)
-    elif refresh == "auto" and not pipeline.is_fresh(symbol) and symbol.upper() not in REFRESHING:
-        REFRESHING.add(symbol.upper())                # stale: answer now, refresh in the background
-
-        async def bg():
-            try:
-                await asyncio.to_thread(pipeline.refresh, symbol, lambda m: None, days)
-            finally:
-                REFRESHING.discard(symbol.upper())
-        t = asyncio.create_task(bg())
-        TASKS.add(t)
-        t.add_done_callback(TASKS.discard)
-        background = True
-    d = await asyncio.to_thread(dossier.build, symbol, days)
-    return d | {"refreshed_now": report is not None, "refreshing": background or symbol.upper() in REFRESHING}
+    sym = symbol.upper()
+    never = get_ledger().fetchone("SELECT 1 AS x FROM nd_state WHERE symbol=?", [sym]) is None
+    if refresh == "force" or (refresh == "auto" and (never or not pipeline.is_fresh(sym))):
+        t = progress.start(sym, days, who="you" if refresh == "force" else "first fetch" if never else "page (data was stale)")
+        if wait and t is not None:
+            await t
+    d = await asyncio.to_thread(dossier.build, sym, days)
+    p = progress.get(sym)
+    return d | {"refreshing": p["running"], "never_fetched": never and p["running"], "progress": progress.public(p)}
 
 
-REFRESHING: set[str] = set()
+@app.get("/api/newsdesk/progress/{symbol}")
+def nd_progress(symbol: str):
+    from .newsdesk import progress
+    return progress.public(progress.get(symbol))
 
 
 @app.get("/api/newsdesk/article/{article_id}")

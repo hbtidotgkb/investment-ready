@@ -169,14 +169,19 @@ def refresh(symbol: str, log=lambda m: None, days: int | None = None) -> dict:
     entry = watch.get(sym)
     days = days or int(config("newsdesk").get("window_days", 90))
     report = {"symbol": sym, "sources": {}, "failed": []}
+    label = {"nse_filings": "NSE filings", "press": "Press search", "feeds": "Publisher feeds", "captures": "Your ET captures"}
     for name, fn in [("nse_filings", lambda: fetch.nse_filings(sym, log)),
                      ("press", lambda: fetch.press(entry, min(days, 90), log)),
                      ("feeds", lambda: fetch.feeds(entry, log)),
                      ("captures", lambda: fetch.captures(sym))]:
         try:
+            if name != "nse_filings":
+                log(f"{label[name]}: fetching…")
             items = fn()
             res = ingest(sym, items)
             report["sources"][name] = {"items": len(items), **res}
+            log(f"{label[name]}: {len(items)} item(s) · {res['new']} new · {res['linked']} about {sym} · "
+                f"{res['dropped']} set aside · {res['events_new']} new event(s)")
         except Exception as e:
             report["failed"].append(f"{name}: {type(e).__name__}: {str(e)[:150]}")
             log(f"{name} failed: {type(e).__name__}")

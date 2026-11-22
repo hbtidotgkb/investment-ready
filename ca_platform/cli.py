@@ -135,8 +135,10 @@ def cmd_news(a):
     sym = a.symbol.upper()
     if _ledger_locked():
         with _server() as c:
-            d = c.get(f"/api/newsdesk/dossier/{sym}", params={"days": a.days, "refresh": "force" if a.action == "check" else "auto"},
-                      timeout=300).json()
+            d = c.get(f"/api/newsdesk/dossier/{sym}", params={"days": a.days, "refresh": "force" if a.action == "check" else "auto",
+                                                               "wait": "true"}, timeout=900).json()
+            for s in (d.get("progress") or {}).get("steps", []):
+                print(f"  {s['t']} {s['m']}")
     else:
         from .newsdesk import dossier, pipeline
         if a.action == "check" or not pipeline.is_fresh(sym):

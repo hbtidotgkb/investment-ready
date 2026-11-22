@@ -41,6 +41,37 @@ def test_taxonomy_metrics_and_opinion():
     assert taxonomy.classify("Clarification on news item", official=False) != "clarification"  # only a filing clarifies
 
 
+def test_remove_keeps_names_and_readd_restores():
+    watch.upsert({"symbol": "RMV", "name": "Remove Me Ltd", "aliases": ["Remove Me"], "exclude": ["Remove Me Not"], "watch": True})
+    assert any(e["symbol"] == "RMV" for e in watch.watchlist())
+    watch.remove("RMV")
+    assert not any(e["symbol"] == "RMV" for e in watch.watchlist())      # no background refresh
+    back = watch.upsert({"symbol": "RMV", "watch": True})
+    assert back["exclude"] == ["Remove Me Not"] and back["aliases"] == ["Remove Me"]
+
+
+def test_progress_reports_steps(monkeypatch):
+    import asyncio
+    from ca_platform.newsdesk import progress
+
+    def fake_refresh(sym, log, days=None):
+        log("NSE announcements: 3 found · 1 new filing PDF(s) to read this time")
+        log("Reading filing PDF 1 of 1: Outcome of Board Meeting")
+        return {"symbol": sym, "sources": {}, "failed": []}
+    monkeypatch.setattr(progress.pipeline, "refresh", fake_refresh)
+
+    async def go():
+        t = progress.start("PRG", who="test")
+        assert progress.get("PRG")["running"]
+        assert progress.start("PRG") is t               # one refresh per stock at a time
+        await t
+        return progress.public(progress.get("PRG"))
+    p = asyncio.run(go())
+    msgs = [s["m"] for s in p["steps"]]
+    assert not p["running"] and p["finished"] and "_task" not in p
+    assert any("Reading filing PDF 1 of 1" in m for m in msgs) and msgs[-1].startswith("Done")
+
+
 def test_salience_excludes_lookalikes():
     setup_stock()
     e = watch.get("ACME")

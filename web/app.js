@@ -674,12 +674,44 @@ async function viewNews(sym) {
   $('#app').innerHTML = `<div class="grid" style="grid-template-columns:260px 1fr;align-items:start">
     <div class="card tight"><h3>Newsdesk watchlist</h3>
       <p class="small muted">Watched stocks are refreshed in the background while <code>ca serve</code> runs${w.last_sweep ? ` · last sweep ${esc(w.last_sweep.slice(11, 16))}` : ''}${w.next_in_minutes ? ` · every ${w.next_in_minutes} min now` : ''}.</p>
-      ${wl.stocks.map((s) => `<div class="row" style="margin:4px 0"><a href="#/news/${esc(s.symbol)}" class="${s.symbol === sym ? 'pill info' : 'pill'}">${esc(s.symbol)}</a><span class="small muted">${s.last_refresh ? esc(s.last_refresh.slice(5, 16).replace('T', ' ')) : 'never'}</span></div>`).join('') || '<div class="muted small">No stocks yet.</div>'}
+      ${wl.stocks.map((s) => `<div class="row" style="margin:4px 0"><a href="#/news/${esc(s.symbol)}" class="${s.symbol === sym ? 'pill info' : 'pill'}">${esc(s.symbol)}</a><span class="small muted">${s.last_refresh ? esc(s.last_refresh.slice(5, 16).replace('T', ' ')) : 'never'}</span><span class="spacer"></span><button class="icon-btn" style="width:24px;height:24px" data-rm-sym="${esc(s.symbol)}" title="Remove ${esc(s.symbol)} from the watchlist">×</button></div>`).join('') || '<div class="muted small">No stocks yet.</div>'}
       <div class="row" style="margin-top:10px"><input id="nd-add" type="text" placeholder="Add, e.g. TCS" style="width:120px;text-transform:uppercase"><button class="btn sm" id="nd-add-go">Add</button></div>
       <p class="small muted" style="margin-top:10px">Any symbol works without adding it — open <code>#/news/SYMBOL</code>. Adding it enables background refresh.</p></div>
     <div id="nd-main">${sym ? '<div class="card"><div class="loading">Building dossier… the first fetch of a stock can take a few minutes (NSE filings and their PDFs, at a polite one request per second); later refreshes are quick.</div></div>' : '<div class="card empty">Add a stock to start.</div>'}</div></div>`;
   $('#nd-add-go').onclick = async () => { const s = $('#nd-add').value.trim().toUpperCase(); if (!s) return; try { await api('/api/newsdesk/watchlist', { method: 'POST', body: { symbol: s, watch: true } }); location.hash = `#/news/${s}`; } catch (e) { toast(e.message); } };
+  $$('[data-rm-sym]').forEach((b) => (b.onclick = () => removeWatch(b.dataset.rmSym, sym)));
   if (sym) loadDossier(sym, 'auto');
+}
+
+async function removeWatch(s, current) {
+  try {
+    await api(`/api/newsdesk/watchlist/${encodeURIComponent(s)}/remove`, { method: 'POST' });
+    toast(`${s} removed — no more background refreshes. Its stored news is kept and still used by analyses.`);
+    if (s === current) location.hash = '#/news'; else viewNews(current);
+  } catch (e) { toast(e.message); }
+}
+
+let ND_POLL = null;
+function progressCard(p, first) {
+  const steps = (p.steps || []).slice(-14);
+  return `<div class="card" id="nd-progress"><div class="row"><span class="st-icon ${p.running ? 'running' : p.error ? 'failed' : 'completed'}">${p.running ? '' : p.error ? '!' : '✓'}</span>
+    <h3 style="margin:0">${p.running ? (first ? 'First fetch in progress' : 'Refreshing in the background') : p.error ? 'Refresh failed' : 'Refresh finished'}</h3>
+    <span class="spacer"></span><span class="small muted">started ${esc((p.started || '').slice(11, 19))} by ${esc(p.who || '—')}</span></div>
+    ${first ? '<p class="small muted">NSE serves filing PDFs slowly (about 20–40 s each, read one at a time). Each line below is a real step as it happens.</p>' : ''}
+    <div class="logs" style="margin-left:0;max-height:320px">${steps.map((s) => `<div><span class="ts">${esc(s.t)}</span>${esc(s.m)}</div>`).join('') || '<div class="muted">Starting…</div>'}</div></div>`;
+}
+
+function pollProgress(sym, first) {
+  clearTimeout(ND_POLL);
+  ND_POLL = setTimeout(async () => {
+    if (!location.hash.startsWith('#/news')) return;
+    const p = await api(`/api/newsdesk/progress/${sym}`).catch(() => null);
+    if (!p) return;
+    const box = $('#nd-progress');
+    if (box) box.outerHTML = progressCard(p, first);
+    if (p.running) pollProgress(sym, first);
+    else setTimeout(() => { if (location.hash.startsWith('#/news')) viewNews(sym); }, 1500);
+  }, 2000);
 }
 
 async function loadDossier(sym, refresh) {
@@ -691,10 +723,14 @@ async function loadDossier(sym, refresh) {
   const q = d.quality, C = d.citations;
   const rep = d.refresh_report;
   const cite = (n) => { const c = C[String(n)]; return c ? `<span class="cite ${c.tier === 'T1_official' ? 'verified' : 'id_only'}" data-nd="${c.article_id}" title="${esc(c.publisher)} · ${esc(c.tier)}${c.headline_only ? ' · headline only' : ''}">${n}</span>` : ''; };
-  if (d.refreshing) setTimeout(() => { if (location.hash.startsWith('#/news')) loadDossier(sym, 'no'); }, 45000);
-  main.innerHTML = `${d.refreshing ? '<div class="card notice info">Showing stored news while a background refresh runs (NSE filings and PDFs are slow). This view reloads by itself.</div>' : ''}<div class="card"><div class="row"><h2 style="margin:0">${esc(d.symbol)}</h2><span class="muted">${esc(d.name)}</span><span class="spacer"></span>
+  const watched = (await api('/api/newsdesk/watchlist')).stocks.some((s) => s.symbol === d.symbol);
+  if (d.refreshing) pollProgress(sym, d.never_fetched);
+  if (d.never_fetched) { main.innerHTML = progressCard(d.progress, true); return; }
+  main.innerHTML = `${d.refreshing ? progressCard(d.progress, false) : ''}<div class="card"><div class="row"><h2 style="margin:0">${esc(d.symbol)}</h2><span class="muted">${esc(d.name)}</span><span class="spacer"></span>
       <div class="seg" id="nd-days">${[30, 90, 180].map((k) => `<button data-d="${k}" class="${k === days ? 'on' : ''}">${k}d</button>`).join('')}</div>
-      <button class="btn sm" id="nd-refresh">Refresh now</button><a class="btn sm primary" href="#/" id="nd-analyse">Analyse ${esc(d.symbol)}</a></div>
+      <button class="btn sm" id="nd-refresh" ${d.refreshing ? 'disabled' : ''}>Refresh now</button>
+      ${watched ? `<button class="btn sm" id="nd-unwatch" title="Stop background refreshes for ${esc(d.symbol)}">Stop watching</button>` : ''}
+      <a class="btn sm primary" href="#/" id="nd-analyse">Analyse ${esc(d.symbol)}</a></div>
     <p class="small muted">As of ${dt(d.as_of)} · last fetch ${d.last_refresh ? dt(d.last_refresh) : 'never'}${rep ? ' · ' + Object.entries(rep.sources).map(([k, v]) => `${k}: ${v.items}`).join(' · ') : ''}${rep && rep.failed.length ? ` · <span class="res fail">failed: ${esc(rep.failed.join('; '))}</span>` : ''}</p>
     <div class="kv"><div><span>Events</span><b>${q.events}</b></div><div><span>Filed / confirmed</span><b>${q.filed_or_confirmed}</b></div><div><span>Filing on event</span><b>${q.filing_on_event}</b></div>
       <div><span>Press only</span><b>${q.press_only}</b></div><div><span>Contradicted / denied</span><b>${q.against}</b></div><div><span>Headline only</span><b>${q.headline_only_events}</b></div></div>
@@ -713,7 +749,8 @@ async function loadDossier(sym, refresh) {
       ${['aliases', 'link_only', 'related', 'exclude'].map((k) => `<label class="small"><b>${k}</b><input id="nd-${k}" type="text" style="width:100%" value="${esc((entry[k] || []).join(', '))}"></label>`).join('')}
       <div class="row" style="margin-top:8px"><label class="small">market cap ₹ cr <input id="nd-mcap" type="text" style="width:120px" value="${esc(entry.market_cap_cr || '')}"></label><button class="btn sm primary" id="nd-save">Save &amp; watch</button></div></div></div>`;
   $('#nd-days').onclick = (e) => { const k = e.target.dataset.d; if (k) { store.set('nd-days', Number(k)); loadDossier(sym, 'no'); } };
-  $('#nd-refresh').onclick = () => { main.querySelector('.card').insertAdjacentHTML('afterbegin', '<div class="notice info">Refreshing…</div>'); loadDossier(sym, 'force'); };
+  $('#nd-refresh').onclick = () => loadDossier(sym, 'force');
+  const uw = $('#nd-unwatch'); if (uw) uw.onclick = () => removeWatch(sym, sym);
   $('#nd-analyse').onclick = () => { try { sessionStorage.setItem('ca-sym', sym); } catch (e) { /* ignore */ } };
   $('#nd-save').onclick = async () => {
     const list = (k) => $(`#nd-${k}`).value.split(',').map((x) => x.trim()).filter(Boolean);

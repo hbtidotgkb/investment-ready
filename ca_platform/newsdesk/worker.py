@@ -31,7 +31,11 @@ async def sweep() -> dict:
         if pipeline.is_fresh(sym):
             continue
         try:
-            r = await asyncio.to_thread(pipeline.refresh, sym)
+            from . import progress
+            t = progress.start(sym, who="background worker")
+            if t is not None:
+                await t
+            r = progress.get(sym).get("report") or {"sources": {}}
             done[sym] = {k: v.get("new", 0) for k, v in r["sources"].items()}
         except Exception as ex:  # one stock failing never stops the sweep
             STATUS["last_error"] = f"{sym}: {type(ex).__name__}: {str(ex)[:120]}"
