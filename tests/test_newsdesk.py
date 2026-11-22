@@ -145,9 +145,17 @@ def test_point_in_time_and_unknown_dates():
 
 def test_dossier_to_evidence_and_brain_routing():
     setup_stock()
+    pipeline.ingest("ACME", [press("Acme Infra share price live updates: stock edges up", 6),
+                             press("Acme Infra bags metro deal", 7, pub="Unknown Blog", tier="unregistered")])
     d = dossier.build("ACME", 30)
+    reasons = {s["reason"].split(" (")[0] for s in d["set_aside"]}
+    assert {"low-quality item", "publisher not in source registry"} <= reasons      # every set-aside item has a reason
+    assert all(s["title"] and s["article_id"] for s in d["set_aside"])
     fac = EvidenceFactory()
     out = dossier.to_evidence(fac, d, candles=[{"date": at(-30)[:10], "close": 100.0}, {"date": iso()[:10], "close": 110.0}])
+    ids = {e.id for e in fac.items}
+    assert set(out["evidence_ids"]) == set(d["citations"]) and set(out["evidence_ids"].values()) <= ids
+    assert out["summary_evidence_id"] in ids
     kinds = {e.kind for e in fac.items}
     assert {"exchange_announcement", "news_article", "news_summary"} <= kinds and out["evidence_items"] >= 5
     summ = next(e for e in fac.items if e.kind == "news_summary")

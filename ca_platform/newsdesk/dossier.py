@@ -88,6 +88,7 @@ def build(symbol: str, days: int | None = None, as_of: str | None = None) -> dic
         "SELECT a.*, l.salience FROM nd_articles a JOIN nd_links l ON l.article_id=a.id WHERE l.symbol=?", [sym])}
     visible = {}
     dropped: dict[str, int] = {}
+    set_aside: list[dict] = []
     for aid, a in arts.items():
         if (_dt(a["first_seen_at"]) or as_of_dt) > as_of_dt:
             continue                                            # not yet seen at this moment
@@ -99,6 +100,8 @@ def build(symbol: str, days: int | None = None, as_of: str | None = None) -> dic
         if a["dropped_reason"]:
             key = a["dropped_reason"].split(" (")[0]
             dropped[key] = dropped.get(key, 0) + 1
+            set_aside.append({"article_id": aid, "title": a["title"], "publisher": a["publisher"], "url": a["url"],
+                              "reason": a["dropped_reason"], "published_at": a["published_at"], "via": a["via"]})
             continue
         visible[aid] = a
 
@@ -226,7 +229,8 @@ def build(symbol: str, days: int | None = None, as_of: str | None = None) -> dic
             "window_days": days, "built_at": iso(), "last_refresh": state["last_refresh"] if state else None,
             "refresh_report": json.loads(state["last_counts"]) if state and state["last_counts"] else None,
             "events": events, "coming_up": coming_up, "check_first": check_first, "not_known": not_known,
-            "citations": cites, "quality": quality}
+            "citations": cites, "quality": quality,
+            "set_aside": sorted(set_aside, key=lambda x: (x["reason"], x["published_at"] or ""), reverse=False)[:150]}
 
 
 def article(article_id: int) -> dict | None:
@@ -308,4 +312,7 @@ def to_evidence(fac, dossier: dict, candles: list[dict] | None = None, skip_urls
         fac.add(kind="news_summary", title=f"Newsdesk summary for {dossier['symbol']} (computed)", publisher="ca_platform newsdesk",
                 tier="SYS_computed", passages=lines, retrieved_via="newsdesk:summary",
                 notes=f"Computed from the dossier as of {dossier['as_of']}; statuses by code (metric-matched claim checks).")
-    return {"evidence_items": made, "events": len(dossier["events"]), "coming_up": len(dossier["coming_up"])}
+    summary_id = fac.items[-1].id if lines else None
+    return {"evidence_items": made, "events": len(dossier["events"]), "coming_up": len(dossier["coming_up"]),
+            "evidence_ids": {n: by_article[c["article_id"]] for n, c in dossier["citations"].items() if c["article_id"] in by_article},
+            "summary_evidence_id": summary_id}

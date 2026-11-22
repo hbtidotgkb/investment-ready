@@ -366,7 +366,7 @@ function renderResults() {
     </div></div></div>
   ${topSourcesCard(dr)}
   <div class="card">${loops.length > 1 ? `<div class="row" style="margin-bottom:8px"><span class="small muted">Showing details for</span><div class="seg" id="rl">${loops.map((l) => `<button data-l="${l.loop}" class="${l.loop === currentLoopNo() ? 'on' : ''}">Loop ${l.loop}${l.loop === loops.length ? ' (final)' : ''}</button>`).join('')}</div></div>` : ''}
-  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
+  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['news', `News${dr.newsdesk && dr.newsdesk.dossier ? ` (${dr.newsdesk.dossier.events.length})` : ''}`], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
   $('#tabs').onclick = (e) => { const t = e.target.dataset.t; if (t) { RUN.tab = t; $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t === t)); renderTab(); } };
   const rl = $('#rl'); if (rl) rl.onclick = (e) => { const l = e.target.dataset.l; if (l) { RUN.resultLoop = Number(l); renderResults(); } };
   const ts = $('#topn'); if (ts) ts.onclick = (e) => { const n = e.target.dataset.n; if (n) { store.set('ca-topn', Number(n)); renderResults(); } };
@@ -408,7 +408,7 @@ function topSourcesCard(dr) {
 
 function renderTab() {
   const dr = currentRecord(), b = currentBundle(dr), el = $('#tab-body');
-  const T = { overview: tabOverview, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
+  const T = { overview: tabOverview, news: tabNews, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
   el.innerHTML = T(dr, b);
   if (RUN.tab === 'overview') drawChart(dr, b);
   if (RUN.tab === 'sources') bindSourceFilter();
@@ -428,6 +428,44 @@ function tabOverview(dr, b) {
       ${(b.quality_flags || []).length ? `<h4 style="margin-top:16px">Quality flags</h4><ul class="small">${b.quality_flags.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
       ${(dr.learn || []).length ? `<h4 style="margin-top:16px">Learn</h4>${dr.learn.map((l) => `<span class="pill info">${esc(titleCase(l))}</span> `).join('')}` : ''}
     </div></div>`;
+}
+
+function tabNews(dr) {
+  const nd = dr.newsdesk || {};
+  const d = nd.dossier;
+  if (!d) {
+    return dr.mode === 'demo' ? '<div class="empty">DEMO runs use synthetic news, not Newsdesk. Run in Live mode to see the news snapshot here.</div>'
+      : '<div class="empty">This run has no saved Newsdesk snapshot (it ran before snapshots were recorded, or the news stage failed — see its progress log).</div>';
+  }
+  const q = d.quality, ids = nd.evidence_ids || {};
+  // A chip opens the exact bundle source the brains received; set-aside items open the stored copy.
+  const chip = (n) => {
+    const c = d.citations[String(n)]; if (!c) return '';
+    const evId = ids[String(n)];
+    return evId ? `<span class="cite ${c.tier === 'T1_official' ? 'verified' : 'id_only'}" data-ev="${esc(evId)}" data-pid="" data-q="" data-st="source" title="${esc(c.publisher)} · ${esc(c.tier)}">${n}</span>`
+      : `<span class="cite id_only" data-nd="${c.article_id}" title="${esc(c.publisher)}">${n}</span>`;
+  };
+  const rep = nd.refresh;
+  return `<div class="notice info">This is the <b>exact news snapshot this analysis used</b> (as of ${dt(d.as_of)}${nd.refreshed_in_run === false ? ', reused fresh data from the background worker' : nd.refreshed_in_run ? ', fetched during this run' : ''}). The live view may have changed since:
+      <a href="#/news/${esc(d.symbol)}">open live Newsdesk for ${esc(d.symbol)} →</a></div>
+    ${rep ? `<p class="small muted">Fetched in this run: ${Object.entries(rep.sources).map(([k, v]) => `${esc(k)} ${v.items}`).join(' · ')}${rep.failed.length ? ` · <span class="res fail">failed: ${esc(rep.failed.join('; '))}</span>` : ''}</p>` : ''}
+    <div class="kv"><div><span>Events</span><b>${q.events}</b></div><div><span>Filed / confirmed</span><b>${q.filed_or_confirmed}</b></div><div><span>Filing on event</span><b>${q.filing_on_event}</b></div>
+      <div><span>Press only</span><b>${q.press_only}</b></div><div><span>Contradicted / denied</span><b>${q.against}</b></div><div><span>Set aside</span><b>${(d.set_aside || []).length}</b></div></div>
+    ${d.check_first.length ? `<div class="notice bad" style="margin-top:12px"><b>Check these first:</b><br>${d.check_first.map(esc).join('<br>')}</div>` : ''}
+    <h3 style="margin-top:14px">Events the brains received, ranked</h3>
+    <p class="small muted">Status is computed by code: a press figure is confirmed or contradicted only by a filed figure of the same metric; wording-alike copies count as one story. Click a number to open the source exactly as frozen into this run's bundle.
+      ${nd.summary_evidence_id ? `The status lines themselves are source <span class="cite verified" data-ev="${esc(nd.summary_evidence_id)}" data-pid="" data-q="" data-st="source">${esc(nd.summary_evidence_id)}</span>.` : ''}</p>
+    ${d.events.map((e, i) => `<div class="obj ${e.status === 'contradicted' || e.status === 'denied' ? 'blocker' : ['filed', 'confirmed'].includes(e.status) ? '' : 'minor'}">
+      <div class="row"><b>${i + 1}.</b><span class="pill ${ND_PILL[e.status] || ''}">${esc(e.status_label)}</span><span class="pill">${esc(titleCase(e.type))}</span><span class="pill">${esc(e.fact_type)}</span><span class="spacer"></span><span class="small muted">conf ${e.confidence} · weight ${e.score}</span></div>
+      <div>${esc(e.title)} ${e.citations.map(chip).join('')}</div>
+      <div class="small muted">${e.filings} filing(s) · ${e.independent_press_stories} independent press stor${e.independent_press_stories === 1 ? 'y' : 'ies'} · ${esc(e.publishers.join(', '))} · first seen ${esc(e.first_seen.slice(0, 10))}${e.headline_only ? ' · headline only' : ''}</div>
+      ${e.claims.filter((c) => c.amount_cr).map((c) => `<div class="small"><span class="pill ${ND_PILL[c.status] || ''}">${esc(c.status)}</span> ${esc(c.metric)} ₹${fmt(c.amount_cr, 0)} cr — ${esc(c.text.slice(0, 140))}</div>`).join('')}</div>`).join('') || '<div class="empty">No events in the window.</div>'}
+    <div class="grid g2"><div><h3>Coming up</h3>${d.coming_up.map((c) => `<div class="small"><b>${esc(c.date)}</b> ${esc(c.what)} ${chip(c.citation)}</div>`).join('') || '<div class="muted small">Nothing scheduled in filings.</div>'}
+        <h3 style="margin-top:12px">Not known yet</h3>${d.not_known.map((x) => `<div class="small">• ${esc(x)}</div>`).join('') || '<div class="muted small">—</div>'}</div>
+      <div><h3>Set aside — not given to the brains (${(d.set_aside || []).length})</h3>
+        <p class="small muted">Kept on record for transparency. Reasons: ${Object.entries(q.dropped).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'none'}</p>
+        <div class="tbl-wrap" style="max-height:420px;overflow:auto"><table><tbody>${(d.set_aside || []).map((s) => `<tr><td class="small"><span class="pill">${esc(s.reason.split(' (')[0])}</span></td>
+          <td class="small"><a href="javascript:void 0" data-nd="${s.article_id}">${esc((s.title || '').slice(0, 110))}</a><div class="muted">${esc(s.publisher || '')}${s.reason.includes('(') ? ' · ' + esc(s.reason.slice(s.reason.indexOf('('))) : ''}</div></td></tr>`).join('')}</tbody></table></div></div></div>`;
 }
 
 function tabAnalysts(dr) {
@@ -734,7 +772,8 @@ async function loadDossier(sym, refresh) {
     <p class="small muted">As of ${dt(d.as_of)} · last fetch ${d.last_refresh ? dt(d.last_refresh) : 'never'}${rep ? ' · ' + Object.entries(rep.sources).map(([k, v]) => `${k}: ${v.items}`).join(' · ') : ''}${rep && rep.failed.length ? ` · <span class="res fail">failed: ${esc(rep.failed.join('; '))}</span>` : ''}</p>
     <div class="kv"><div><span>Events</span><b>${q.events}</b></div><div><span>Filed / confirmed</span><b>${q.filed_or_confirmed}</b></div><div><span>Filing on event</span><b>${q.filing_on_event}</b></div>
       <div><span>Press only</span><b>${q.press_only}</b></div><div><span>Contradicted / denied</span><b>${q.against}</b></div><div><span>Headline only</span><b>${q.headline_only_events}</b></div></div>
-    <p class="small muted">Set aside (kept on record, not used): ${Object.entries(q.dropped).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'none'}</p></div>
+    <details><summary class="small">Set aside (kept on record, not used): ${Object.entries(q.dropped).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'none'}</summary>
+      <div class="tbl-wrap" style="max-height:320px;overflow:auto"><table><tbody>${(d.set_aside || []).map((s) => `<tr><td class="small"><span class="pill">${esc(s.reason.split(' (')[0])}</span></td><td class="small"><a href="javascript:void 0" data-nd="${s.article_id}">${esc((s.title || '').slice(0, 110))}</a> <span class="muted">${esc(s.publisher || '')}</span></td></tr>`).join('')}</tbody></table></div></details></div>
   ${d.check_first.length ? `<div class="card notice bad"><b>Check these first:</b><br>${d.check_first.map(esc).join('<br>')}</div>` : ''}
   <div class="card"><h3>Events, ranked</h3><p class="small muted">score = materiality × confidence × recency. Wording-alike articles from several outlets count as one story; a press figure is "confirmed" only by a filed figure of the same metric within 5%.</p>
     ${d.events.map((e, i) => `<div class="obj ${e.status === 'contradicted' || e.status === 'denied' ? 'blocker' : e.status === 'filed' || e.status === 'confirmed' ? '' : 'minor'}">

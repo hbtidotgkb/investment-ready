@@ -338,7 +338,9 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         from .newsdesk import pipeline as nd_pipeline
         if nd_pipeline.is_fresh(symbol):
             ev.log("filings", "Newsdesk: data is fresh (kept current by the background worker) — no refetch")
+            nd_info["refreshed_in_run"] = False
         else:
+            nd_info["refreshed_in_run"] = True
             ev.log("filings", "Newsdesk: refreshing NSE filings (with PDFs), press search, feeds and captures…")
             nd_report = await asyncio.to_thread(nd_pipeline.refresh, symbol, lambda m: ev.log("filings", f"Newsdesk · {m}"))
             nd_info["refresh"] = nd_report
@@ -386,6 +388,10 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         from .newsdesk import dossier as nd_dossier
         dossier = await asyncio.to_thread(nd_dossier.build, symbol, None, iso())
         nd_ev = nd_dossier.to_evidence(fac, dossier, candles)
+        # The exact news snapshot this loop used, kept with the decision (shown in the run's News tab).
+        nd_info["dossier"] = dossier
+        nd_info["evidence_ids"] = nd_ev["evidence_ids"]
+        nd_info["summary_evidence_id"] = nd_ev["summary_evidence_id"]
         q = dossier["quality"]
         ev.log("news", f"Newsdesk dossier: {q['events']} events ({q['filed_or_confirmed']} filed/confirmed, "
                f"{q['press_only']} press-only, {q['against']} contradicted/denied), {len(dossier['coming_up'])} coming up, "
