@@ -15,6 +15,14 @@ PASS, BLOCKED, UNKNOWN, WARN, NA = "pass", "blocked", "unknown", "warn", "not_ap
 
 SUBSTANTIVE = {"surveillance", "pledge", "governance", "audit", "liquidity", "bearish_pattern"}
 ENTRY_RULES = {"reward_risk", "benchmark"}
+# Gates about YOUR setup, not about the stock. When only these block a BUY, the verdict stays BUY
+# and is marked "on hold until setup is complete" — relabelling it "insufficient data" would hide
+# what the panel concluded about the stock.
+SETUP_STATUSES = {"tax_policy_unverified"}
+
+
+def is_setup_gate(r: dict) -> bool:
+    return r["rule"] == "policies_confirmed" or r.get("setup") is True
 
 
 def _r(rule: str, result: str, detail: str, refs: list[str] | None = None, value: Any = None) -> dict:
@@ -290,9 +298,12 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
         calcs.update({"base_gross_return_pct": None if gross is None else round(gross, 2),
                       "benchmark_gross_return_pct": round(bm_gross, 2), "tax_stock": tv, "tax_benchmark": tb})
         if tv["after_tax_pct"] is None or tb["after_tax_pct"] is None:
-            results.append(_r("benchmark", UNKNOWN,
-                              f"After-tax comparison refused ({tv.get('status')}). Pre-tax: stock target-low "
-                              f"{'n/a' if gross is None else f'{gross:.1f}%'} vs benchmark assumption {bm_gross:.1f}% over {months} months."))
+            bm = _r("benchmark", UNKNOWN,
+                    f"After-tax comparison refused ({tv.get('status')}). Pre-tax: stock target-low "
+                    f"{'n/a' if gross is None else f'{gross:.1f}%'} vs benchmark assumption {bm_gross:.1f}% over {months} months.")
+            if tv.get("status") in SETUP_STATUSES and gross is not None and gross > bm_gross:
+                bm["setup"] = True          # pre-tax already beats the benchmark; only the tax file is missing
+            results.append(bm)
         else:
             ok = tv["after_tax_pct"] > tb["after_tax_pct"]
             results.append(_r("benchmark", PASS if ok else BLOCKED,
@@ -303,9 +314,14 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
     final_decision = head.get("decision")
     adjustments = []
     actionable = False
+    on_hold = None
     if is_buy:
         if not blocking:
             actionable = True
+        elif all(is_setup_gate(r) for r in blocking):
+            on_hold = "setup"
+            adjustments.append("Head proposed BUY and no rule about the stock objects; it is ON HOLD until your setup is "
+                               "complete: " + "; ".join(f"{r['rule']} ({r['result']})" for r in blocking))
         else:
             names = {r["rule"] for r in blocking}
             if names & SUBSTANTIVE and any(r["result"] == BLOCKED for r in blocking if r["rule"] in SUBSTANTIVE):
@@ -313,21 +329,25 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
             elif all(r["rule"] in ENTRY_RULES | {"plan_validity"} for r in blocking):
                 final_decision = "wait"
             else:
+                stock_blocks = [r for r in blocking if not is_setup_gate(r)]
                 final_decision = "insufficient_data" if any(r["result"] == UNKNOWN or r["rule"] in
-                                                            {"required_evidence", "stale_data", "data_quality", "demo_mode", "policies_confirmed"}
-                                                            for r in blocking) else "wait"
+                                                            {"required_evidence", "stale_data", "data_quality", "demo_mode"}
+                                                            for r in stock_blocks) else "wait"
             adjustments.append(f"Head proposed BUY; rules changed the permitted action to {final_decision.upper()} "
                                f"because: " + "; ".join(f"{r['rule']} ({r['result']})" for r in blocking))
 
-    sizing = size_position(bundle, plan) if actionable else None
-    if actionable and sizing and sizing.get("status") != "ok":
+    sizing = size_position(bundle, plan) if (actionable or on_hold) else None
+    if actionable and sizing and sizing.get("status") == "no_capital":
+        actionable, on_hold = False, "setup"           # capital not configured is setup, not a reason to wait
+        adjustments.append(f"Head proposed BUY; ON HOLD until setup is complete: {sizing.get('detail')}")
+    elif actionable and sizing and sizing.get("status") != "ok":
         actionable = False
         final_decision = "wait"
         adjustments.append(f"Sizing: {sizing.get('detail')}")
 
     return {"rule_results": results, "governance": gov, "calculations": calcs, "adjustments": adjustments,
-            "final_action": {"decision": final_decision, "actionable": actionable,
-                             "plan": plan if (actionable or final_decision == "wait") and is_buy else None,
+            "final_action": {"decision": final_decision, "actionable": actionable, "on_hold": on_hold,
+                             "plan": plan if (actionable or on_hold or final_decision == "wait") and is_buy else None,
                              "sizing": sizing},
             "blocking": [r["rule"] for r in blocking]}
 

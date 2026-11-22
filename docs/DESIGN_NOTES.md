@@ -106,3 +106,7 @@ Finding: NSE's `results-comparision` and `corporates-financial-results` JSON sto
 - Manual facts win a tie (same metric and period).
 - Prompts: `quant@2.1.0` (use the computed valuation lines; no imported multiples), `forensic@2.1.0` (check → evidence map; insider part unverified).
 - UI: run **Numbers** tab + valuation box on Overview. CLI: `ca fundamentals SYMBOL [--price X]`; API `/api/fundamentals/{symbol}`.
+
+### Setup gates vs stock verdict (0.7.1)
+
+`policies_confirmed`, an unverified tax file (when pre-tax already beats the benchmark) and unconfigured capital are **setup gates**. When they are the only blockers of a Head BUY, the verdict stays **BUY — on hold until setup is complete** (not actionable) instead of being relabelled "insufficient data". Any stock-specific block still wins (e.g. surveillance → AVOID). `head@2.2.0` tells the Head not to let setup gates shape its decision. "Insufficient data" is now shown as **"Don't buy yet — not enough evidence"**.

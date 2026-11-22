@@ -664,7 +664,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
     g = enf["governance"]
     ev.log("rules", f"Governance (code rubric {g['rubric']}): {g['score'] if g['score'] is not None else 'withheld'} · coverage {g['coverage']:.0%}")
     ev.end("rules", "completed", f"Permitted action: {enf['final_action']['decision'].upper()} "
-           f"({'actionable' if enf['final_action']['actionable'] else 'not actionable'})", enf)
+           f"({'actionable' if enf['final_action']['actionable'] else 'on hold until setup is complete' if enf['final_action'].get('on_hold') else 'not actionable'})", enf)
 
     ev.start("consistency", "Validating the whole final plan")
     cons = R.consistency(enf, head_dict)

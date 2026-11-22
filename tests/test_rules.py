@@ -129,3 +129,27 @@ def test_stale_price_blocks():
     b = _bundle(price={"close": 100.0, "date": "2026-11-05"})
     pre = {r["rule"]: r for r in R.preflight(b)}
     assert pre["stale_data"]["result"] == "blocked"
+
+
+def test_setup_only_blocks_keep_the_buy_verdict_on_hold(monkeypatch):
+    """policies_confirmed:false, unverified tax file and no capital are about YOUR setup, not the stock:
+    the verdict stays BUY (not actionable, on hold) instead of turning into 'insufficient data'."""
+    def cfg(name):
+        c = copy.deepcopy(real_config(name))
+        if name == "user":
+            c["policies_confirmed"] = False
+            c["capital"]["total_investment_capital_inr"] = None
+        return c
+    monkeypatch.setattr(R, "config", cfg)
+    b = _bundle(horizon="medium")
+    out = R.enforce(b, R.preflight(b), HEAD_BUY, PANEL_OK | {"forensic_checks": _clean_checks()})
+    fa = out["final_action"]
+    assert fa["decision"] == "buy" and fa["on_hold"] == "setup" and not fa["actionable"]
+    assert fa["plan"] is not None and "ON HOLD" in out["adjustments"][0]
+    # a stock-specific block still wins over setup: surveillance listing → avoid
+    b2 = _bundle(horizon="medium", surveillance={"status": "listed", "stage": "ASM Stage I"})
+    out2 = R.enforce(b2, R.preflight(b2), HEAD_BUY, PANEL_OK | {"forensic_checks": _clean_checks()})
+    assert out2["final_action"]["decision"] == "avoid" and not out2["final_action"]["on_hold"]
+    # missing stock evidence still means insufficient data, even with setup incomplete
+    out3 = R.enforce(b, R.preflight(b), HEAD_BUY, PANEL_OK | {"forensic_checks": [], "brains_ok": False})
+    assert out3["final_action"]["decision"] == "insufficient_data"

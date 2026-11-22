@@ -104,12 +104,19 @@ def pick_concepts(decision_record: dict) -> list[str]:
     return picks[:2]
 
 
+def decision_text(fa: dict) -> str:
+    """'insufficient_data' reads as a non-answer; say plainly what it means for the reader."""
+    d = fa["decision"]
+    return {"insufficient_data": "DON'T BUY YET — NOT ENOUGH EVIDENCE"}.get(d, d.upper().replace("_", " "))
+
+
 def whatsapp(dr: dict) -> str:
     fa = dr["final_action"]
     head = dr["head_proposal"]
     plan = fa.get("plan") or {}
     lines = [f"*{dr['symbol']}* — {dr['horizon'].title()} horizon" + (" (DEMO)" if dr["mode"] == "demo" else ""),
-             f"Decision: *{fa['decision'].upper().replace('_', ' ')}*" + (" ✅ actionable" if fa["actionable"] else " · research only")]
+             f"Decision: *{decision_text(fa)}*" + (" ✅ actionable" if fa["actionable"] else
+                                                   " · on hold until setup is complete" if fa.get("on_hold") else " · research only")]
     if head["decision"] != fa["decision"]:
         lines.append(f"Head proposed {head['decision'].upper()}; adjusted by rules.")
     lines.append(f"Why: {head['summary']}")
@@ -136,7 +143,7 @@ def markdown_report(dr: dict, bundle: dict) -> str:
     out = [f"# {dr['symbol']} — {dr['company_name']}", "",
            f"*Run {dr['run_id']} · decision time {dr['decision_at']} · mode {dr['mode']} · bundle `{dr['bundle_id'][:16]}`*", "",
            f"> {DISCLAIMER}", "",
-           f"## Final action: **{fa['decision'].upper()}** ({'actionable' if fa['actionable'] else 'not actionable'})", "",
+           f"## Final action: **{decision_text(fa)}** ({'actionable' if fa['actionable'] else 'on hold until setup is complete' if fa.get('on_hold') else 'not actionable'})", "",
            f"Head proposal: **{head['decision'].upper()}** — {head['summary']}", ""]
     for a in dr.get("adjustments", []):
         out.append(f"- Adjusted by rules: {a}")

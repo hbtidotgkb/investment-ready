@@ -41,7 +41,7 @@ function toast(msg) {
 })();
 
 let META = null, HEALTH = null;
-const DECISION_TEXT = { buy: 'Buy', wait: 'Wait', avoid: 'Avoid', insufficient_data: 'Insufficient data', hold: 'Hold', reduce: 'Reduce', exit: 'Exit' };
+const DECISION_TEXT = { buy: 'Buy', wait: 'Wait', avoid: 'Avoid', insufficient_data: "Don't buy yet — not enough evidence", hold: 'Hold', reduce: 'Reduce', exit: 'Exit' };
 const STAGE_ROLE = { quant: 'quant', news_brain: 'news', forensic: 'forensic', head_draft: 'head', critic: 'critic', resolution: 'head', filings: 'discovery', news: 'discovery' };
 const FIX_HINTS = {
   demo_mode: 'DEMO uses a fictional company. Run in Live mode for a real decision.',
@@ -343,19 +343,19 @@ function renderResults() {
   $('#results').innerHTML = `
   ${loops.length > 1 ? loopComparison(loops) : ''}
   <div class="card"><div class="verdict">
-    <div><div class="decision-box ${esc(fa.decision)}"><div class="small">${isFinal ? 'Permitted action' : `Loop ${dr.loop} result (superseded)`}</div><div class="d">${esc(DECISION_TEXT[fa.decision] || fa.decision)}</div>
-      <div class="small" style="margin-top:4px">${fa.actionable ? '✅ Actionable under your rules' : 'Research only — not actionable'}</div></div>
+    <div><div class="decision-box ${esc(fa.decision)}"><div class="small">${isFinal ? 'Permitted action' : `Loop ${dr.loop} result (superseded)`}</div><div class="d">${esc(DECISION_TEXT[fa.decision] || fa.decision)}${fa.on_hold ? ' — on hold' : ''}</div>
+      <div class="small" style="margin-top:4px">${fa.actionable ? '✅ Actionable under your rules' : fa.on_hold ? '⏸ The panel and the stock rules say BUY; finish your setup (below) to make it actionable' : 'Research only — not actionable'}</div></div>
       <div class="kv" style="margin-top:12px"><div><span>Last close</span><b>${fmt(dr.price_at_decision)}</b></div><div><span>Head score</span><b>${hp.head_score ?? '—'}</b></div>
       <div><span>Governance</span><b>${dr.governance.score ?? 'withheld'}</b></div><div><span>Evidence</span><b>${esc(hp.evidence_sufficiency || '—')}</b></div></div></div>
     <div>
       <div class="flow"><span class="pill">Head draft: ${esc(DECISION_TEXT[(dr.head_draft || {}).decision] || '—')}</span><span class="arrow">→</span>
         <span class="pill">After critique: ${esc(DECISION_TEXT[hp.decision] || hp.decision)}</span><span class="arrow">→</span>
-        <span class="pill ${fa.actionable ? 'good' : 'warn'}">Rules: ${esc(DECISION_TEXT[fa.decision] || fa.decision)}</span></div>
+        <span class="pill ${fa.actionable ? 'good' : 'warn'}">Rules: ${esc(DECISION_TEXT[fa.decision] || fa.decision)}${fa.on_hold ? ' (on hold: setup)' : ''}</span></div>
       <h2>${esc(hp.summary)}</h2>
       ${statementsHtml(hpA.reasons)}
       ${dr.adjustments.length ? `<div class="notice" style="margin-top:10px"><b>Adjusted by rules:</b> ${dr.adjustments.map(esc).join('<br>')}</div>` : ''}
       ${blocking.length ? `<h4 style="margin-top:14px">What stands between this and an actionable decision</h4><div class="checklist">${blocking.map((r) => `<div><span class="res ${r.result}">${r.result === 'blocked' ? '✖' : '?'}</span><span><b>${esc(titleCase(r.rule))}</b> — ${esc(r.detail)}<br><span class="muted small">${esc(FIX_HINTS[r.rule] || '')}</span></span></div>`).join('')}</div>` : ''}
-      ${plan ? `<h4 style="margin-top:14px">${fa.actionable ? 'Plan' : 'Conditional levels (not actionable)'}</h4><div class="kv">
+      ${plan ? `<h4 style="margin-top:14px">${fa.actionable ? 'Plan' : fa.on_hold ? 'Plan (on hold until setup is complete)' : 'Conditional levels (not actionable)'}</h4><div class="kv">
         <div><span>Entry zone</span><b>${fmt(plan.entry_low, 0)}–${fmt(plan.entry_high, 0)}</b></div><div><span>Stop</span><b>${fmt(plan.stop, 0)}</b></div>
         <div><span>Target</span><b>${fmt(plan.target_low, 0)}${plan.target_high ? '–' + fmt(plan.target_high, 0) : ''}</b></div><div><span>Reward / risk</span><b>${rr ?? '—'}</b></div>
         ${sz ? `<div><span>Quantity</span><b>${sz.qty} sh</b></div><div><span>Planned loss at stop</span><b>₹${fmt(sz.planned_loss_at_stop_inr, 0)}</b></div>` : ''}</div>
