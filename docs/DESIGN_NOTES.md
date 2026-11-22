@@ -110,3 +110,18 @@ Finding: NSE's `results-comparision` and `corporates-financial-results` JSON sto
 ### Setup gates vs stock verdict (0.7.1)
 
 `policies_confirmed`, an unverified tax file (when pre-tax already beats the benchmark) and unconfigured capital are **setup gates**. When they are the only blockers of a Head BUY, the verdict stays **BUY — on hold until setup is complete** (not actionable) instead of being relabelled "insufficient data". Any stock-specific block still wins (e.g. surveillance → AVOID). `head@2.2.0` tells the Head not to let setup gates shape its decision. "Insufficient data" is now shown as **"Don't buy yet — not enough evidence"**.
+
+## 0.8.0 — Every analysis ends in a clear verdict (agreed design)
+
+Code decides whether the evidence is enough; the Head decides the direction.
+
+1. **Red flag about the stock** (surveillance list, pledge above limit or rising, modified audit opinion, governance below minimum, liquidity, short-term confirmed bearish pattern) → **AVOID**, whatever the Head proposed.
+2. **Critical evidence checklist** (`rules.engine.evidence_gate`), by horizon:
+   - all horizons: surveillance status known; shareholding and pledge known
+   - short: ≥60 daily bars and technicals computed (candlesticks, chart patterns, support/resistance, RSI/MACD)
+   - medium/long: ≥200 daily bars; latest results ≤100 days old (`quarterly_freshness_days`); EPS or book value computable; audit opinion within 15 months
+   Missing item → **INSUFFICIENT DATA**, listing each item and how to get it.
+3. **Checklist complete** → the Head must choose **BUY, WAIT or AVOID**. An insufficient-data answer is sent back once with the checklist; a second refusal marks the run **incomplete** with the Head's stated reason.
+- Every verdict carries its "what next", checked in code and repaired if missing: WAIT → a checkable **trigger** (price level + above/below, a date, or a specific filing/event); AVOID → reason + what would change the view; INSUFFICIENT → the specific evidence. When the rules turn a buy into a wait, code sets the trigger (e.g. the price where reward/risk reaches the minimum).
+- **Confidence** (code): High, lowered one step per important gap, never below Low. Gaps: insider trades, news coverage, contingent liabilities, related-party detail, bank slippages. It does not change position size.
+- Prompt `head@2.3.0`. UI: verdict card shows trigger / reason / missing items and confidence; Rules tab shows how the verdict was reached.

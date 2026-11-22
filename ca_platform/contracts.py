@@ -159,6 +159,15 @@ class BrainReportLLM(BaseModel):
 Decision = Literal["buy", "wait", "avoid", "insufficient_data", "hold", "reduce", "exit"]
 
 
+class Trigger(BaseModel):
+    """What must happen before a WAIT becomes a buy decision. Checked by code."""
+    kind: Literal["price", "date", "event"]
+    description: str                                   # plain words, e.g. "close below Rs 2,200 (about 25x TTM EPS)"
+    price_level: Optional[float] = None                # kind=price
+    direction: Optional[Literal["above", "below"]] = None   # kind=price: buy when price goes above/below the level
+    date: Optional[str] = None                         # kind=date (YYYY-MM-DD); optional expected date for kind=event
+
+
 class HeadDecisionLLM(BaseModel):
     decision: Decision
     summary: str
@@ -175,6 +184,10 @@ class HeadDecisionLLM(BaseModel):
     invalidation_conditions: list[str]
     material_dissent: list[str]
     portfolio_limitations: list[str]
+    trigger: Optional[Trigger] = None                  # required when decision == "wait"
+    avoid_reason: Optional[str] = None                 # required when decision == "avoid"
+    would_change_view: list[str] = Field(default_factory=list)   # required for "avoid": what would change it
+    insufficiency_reason: Optional[str] = None         # required for "insufficient_data": the specific evidence
 
 
 class SettlingTest(BaseModel):

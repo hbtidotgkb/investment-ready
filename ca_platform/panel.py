@@ -19,7 +19,7 @@ from typing import Any
 from .citations import BAD, CitationIndex, audit
 from .contracts import BrainReportLLM, Bundle, CritiqueLLM, HeadDecisionLLM, HeadFinalLLM
 from .prompting import annotate_report, brain_view, context_block, panel_bundle_view, system_prompt
-from .rules.engine import plan_valid, reward_risk, scenario_returns
+from .rules.engine import plan_valid, reward_risk, scenario_returns, verdict_problems
 from .settings import config
 
 REMIT = {"quant": "Quant — valuation, setup and entry conditions",
@@ -63,9 +63,11 @@ def brain_checker(role: str, idx: CitationIndex):
     return check
 
 
-def head_checker(idx: CitationIndex):
+def head_checker(idx: CitationIndex, b: Bundle | None = None):
     def check(d: HeadDecisionLLM) -> list[str]:
         errs = list(audit(d, idx)["defects"])
+        if b is not None:      # each verdict must carry its "what next": trigger / avoid reason / insufficiency reason
+            errs += verdict_problems(d.model_dump(), b.price.get("close"), b.decision_at)
         if d.decision == "buy":
             errs += plan_valid(d.model_dump())
         if d.decision in ("avoid", "insufficient_data") and any(
@@ -91,8 +93,8 @@ def critic_checker(idx: CitationIndex):
     return check
 
 
-def final_checker(idx: CitationIndex, objection_ids: list[str]):
-    head_check = head_checker(idx)
+def final_checker(idx: CitationIndex, objection_ids: list[str], b: Bundle | None = None):
+    head_check = head_checker(idx, b)
 
     def check(f: HeadFinalLLM) -> list[str]:
         errs = head_check(f.final)
@@ -168,12 +170,12 @@ def head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop: dict | None
             f"{loop_txt}{rblock}\n{panel_view}\n")
 
 
-async def run_head_draft(gw, b, pre, prior, calcs, rblock, panel_view, idx, stage, prev_loop=None):
+async def run_head_draft(gw, b, pre, prior, calcs, rblock, panel_view, idx, stage, prev_loop=None, extra: str = ""):
     sys_p, ver = system_prompt("head")
-    user = head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop) + (
+    user = head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop) + extra + (
         f"\nWrite your DRAFT decision for the {b.horizon} horizon as the required JSON object.")
     res = await gw.structured(role="head", stage=stage, system=sys_p, user=user, output_model=HeadDecisionLLM,
-                              semantic_check=head_checker(idx))
+                              semantic_check=head_checker(idx, b))
     return res.parsed, ver, res.record
 
 
@@ -189,15 +191,16 @@ async def run_critic(gw, b, pre, calcs, rblock, panel_view, draft: HeadDecisionL
     return res.parsed, ver, res.record
 
 
-async def run_head_final(gw, b, pre, prior, calcs, rblock, panel_view, draft, critique: CritiqueLLM, idx, stage, prev_loop=None):
+async def run_head_final(gw, b, pre, prior, calcs, rblock, panel_view, draft, critique: CritiqueLLM, idx, stage, prev_loop=None,
+                         extra: str = ""):
     sys_p, ver = system_prompt("head")
     user = (head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop)
             + f"<draft>\n{draft.model_dump_json(indent=1)}\n</draft>\n"
             + f"<critique>\n{json.dumps(annotate_report(critique.model_dump(), idx), indent=1, ensure_ascii=False)}\n</critique>\n"
-            + "\nRespond to every objection and give your FINAL decision as the required JSON object.")
+            + extra + "\nRespond to every objection and give your FINAL decision as the required JSON object.")
     ids = [o.id for o in critique.objections]
     res = await gw.structured(role="head", stage=stage, system=sys_p, user=user, output_model=HeadFinalLLM,
-                              semantic_check=final_checker(idx, ids))
+                              semantic_check=final_checker(idx, ids, b))
     return res.parsed, ver, res.record
 
 
@@ -229,3 +232,14 @@ def resolve(critique: CritiqueLLM, final: HeadFinalLLM, idx: CitationIndex) -> d
         if o.severity == "major" and eff == "unresolved":
             open_major.append(o.id)
     return {"rows": rows, "open_blockers": open_blockers, "open_major": open_major}
+
+
+def decide_instruction(gate: dict, reason: str | None) -> str:
+    """Sent back to the Head once when it answers insufficient_data although code's checklist is complete."""
+    items = "\n".join(f"- {i['label']}: {i['detail']}" for i in gate["items"])
+    return ("\n<send_back>\nCode checked the critical evidence for this horizon and ALL of it is present:\n" + items +
+            f"\nYou answered insufficient_data (your reason: {reason or 'none given'}). With the critical evidence present you must "
+            "decide: buy, wait (with a checkable trigger) or avoid (with the reason and what would change it). Conflicting or "
+            "unresolved evidence is a reason to WAIT for the event that resolves it, not insufficient_data. Only if you still "
+            "cannot decide, answer insufficient_data again with insufficiency_reason naming the exact evidence; the run will "
+            "then be recorded as incomplete for the user to review.\n</send_back>\n")

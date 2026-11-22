@@ -172,7 +172,8 @@ def _issue(led, run_id: str, dr: dict) -> None:
     dr["report_path"] = save_report(dr, bundle)
     led.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?,?,?)",
                 [dr["verdict_id"], run_id, dr["symbol"], dr["horizon"], fa["decision"], fa["actionable"], dr["issued_at"], dumps(dr)])
-    complete = not dr["failed_roles"] and dr.get("critique") is not None and dr.get("panel_complete", True)
+    complete = (not dr["failed_roles"] and dr.get("critique") is not None and dr.get("panel_complete", True)
+                and not fa.get("incomplete"))
     led.execute("UPDATE runs SET status=?, finished_at=?, final_decision=?, actionable=?, cost_usd=?, summary=? WHERE run_id=?",
                 ["completed" if complete else "partial", iso(), fa["decision"], fa["actionable"], dr["cost_usd"],
                  dr["head_proposal"].get("summary"), run_id])
@@ -496,6 +497,11 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "exchange_filings": "available" if any(e.tier == "T1_official" and e.kind in ("exchange_filing", "exchange_announcement")
                                                for e in fac.items) else "missing",
         "browser_captures": n_caps,
+        "insider_trades": ((fin_info.get("insider_trades") or {}).get("status") or "unknown") if fin_info else "unknown",
+        "related_party": "available" if (fin_info.get("rpt") or {}).get("rows") else "missing",
+        "is_bank": bool(fin_info.get("is_bank")),
+        "news_quality": ("press_only" if (nd_info.get("quality") or {}).get("events") and
+                         not (nd_info.get("quality") or {}).get("filed_or_confirmed") else "ok"),
     }
     if mode == "demo":
         flags.append("DEMO mode: fictional company and synthetic data — never actionable")
@@ -523,6 +529,10 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         ev.log("bundle", f"Versus loop {loop - 1}: {new_ev} new or changed evidence item(s); parent bundle {carry['bundle_id'][:12]}…")
     idx = CitationIndex(b)
     pre = R.preflight(b)
+    gate = R.evidence_gate(b)
+    new_money = action in ("new_purchase", "additional_purchase")
+    for it in gate["items"]:
+        ev.log("bundle", f"Evidence checklist ({horizon}): {'OK' if it['ok'] else 'MISSING'} — {it['label']}: {it['detail']}")
     nb = sum(r["result"] == R.BLOCKED for r in pre)
     nu = sum(r["result"] == R.UNKNOWN for r in pre)
     ev.log("bundle", f"{len(b.evidence)} evidence items, {sum(len(e.passages) for e in b.evidence)} passages; hash {b.bundle_id[:12]}…")
@@ -577,6 +587,7 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
 
     head_draft = critique = final = None
     dau = None
+    refusals = 0
     resolution = {"rows": [], "open_blockers": [], "open_major": []}
     prev_block = previous_loop_block(carry) if carry else None
     if len(reports) < 2:
@@ -599,6 +610,19 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
             ev.log("head_draft", f"Missing report(s): {', '.join(failed_roles)} — a buy cannot be actionable")
         try:
             head_draft, hver, hrec = await P.run_head_draft(gw, b, pre, prior, calc_view, rblock, pview, idx, "head_draft", prev_block)
+            if new_money and gate["complete"] and head_draft.decision == "insufficient_data":
+                refusals = 1
+                ev.log("head_draft", "Evidence checklist is complete but the Head answered INSUFFICIENT DATA "
+                       f"({head_draft.insufficiency_reason or 'no reason'}) — sending it back once to decide")
+                try:
+                    head_draft, hver, hrec = await P.run_head_draft(
+                        gw, b, pre, prior, calc_view, rblock, pview, idx, "head_draft", prev_block,
+                        extra=P.decide_instruction(gate, head_draft.insufficiency_reason))
+                    ev.log("head_draft", f"After send-back the Head decided: {head_draft.decision.upper()}")
+                    if head_draft.decision == "insufficient_data":
+                        refusals = 2
+                except Exception as e:
+                    ev.log("head_draft", f"Send-back call failed ({type(e).__name__}) — keeping the first draft")
             dau = audit(head_draft, idx)
             ev.end("head_draft", "completed", f"Draft: {head_draft.decision.upper()} — {head_draft.summary}",
                    {"draft": P.annotate_report(head_draft.model_dump(), idx), "audit": dau, "calculations": calc_view,
@@ -631,6 +655,22 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
                     else:
                         final = HeadFinalLLM(responses=[], final=head_draft)
                         ev.log("resolution", "No objections — draft becomes the final proposal without another model call")
+                    if new_money and gate["complete"] and final.final.decision == "insufficient_data":
+                        if refusals == 0 and critique.objections:
+                            refusals = 1
+                            ev.log("resolution", "Evidence checklist is complete but the final answer is INSUFFICIENT DATA — "
+                                   "sending it back once to decide")
+                            try:
+                                final, fver, frec = await P.run_head_final(
+                                    gw, b, pre, prior, calc_view, rblock, pview, head_draft, critique, idx, "resolution", prev_block,
+                                    extra=P.decide_instruction(gate, final.final.insufficiency_reason))
+                                ev.log("resolution", f"After send-back the Head decided: {final.final.decision.upper()}")
+                            except Exception as e:
+                                ev.log("resolution", f"Send-back call failed ({type(e).__name__})")
+                        if final.final.decision == "insufficient_data":
+                            refusals = 2
+                            ev.log("resolution", "The Head declined to decide twice although the evidence was complete — "
+                                   "the run will be marked INCOMPLETE with its reason")
                     resolution = P.resolve(critique, final, idx)
                     for row in resolution["rows"]:
                         r = row["response"] or {}
@@ -697,6 +737,8 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "asked_questions": asked,
         "newsdesk": nd_info,
         "fundamentals": fin_info,
+        "evidence_gate": enf.get("evidence_gate"),
+        "head_refusals": refusals,
         "evaluation_contract": {"id": None, "horizon": horizon, **config("horizons")["evaluation"],
                                 "benchmark_assumption": config("rules")["benchmark"], "frozen_at": iso()},
         "versions": b.versions | {"prompts": {r: config("models")["roles"][r]["prompt"] for r in PANEL_ROLES},

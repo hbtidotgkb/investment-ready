@@ -110,6 +110,27 @@ def decision_text(fa: dict) -> str:
     return {"insufficient_data": "DON'T BUY YET — NOT ENOUGH EVIDENCE"}.get(d, d.upper().replace("_", " "))
 
 
+def what_next_lines(fa: dict) -> list[str]:
+    out = []
+    if fa.get("incomplete"):
+        out.append(f"INCOMPLETE — no valid verdict: {fa['incomplete']['reason']}")
+    elif fa["decision"] == "wait" and fa.get("trigger"):
+        t = fa["trigger"]
+        extra = (f" ({t['direction']} Rs {t['price_level']:,.2f})" if t.get("kind") == "price" and t.get("price_level")
+                 else f" ({t['date']})" if t.get("date") else "")
+        out.append(f"Wait until: {t['description']}{extra}")
+    elif fa["decision"] == "avoid" and fa.get("avoid_reason"):
+        out.append(f"Avoid because: {fa['avoid_reason']}")
+        if fa.get("would_change_view"):
+            out.append("Would change the view: " + "; ".join(fa["would_change_view"]))
+    elif fa["decision"] == "insufficient_data" and fa.get("missing_evidence"):
+        out.append("Missing: " + "; ".join(f"{m['label']} ({m['detail']})" for m in fa["missing_evidence"]))
+    c = fa.get("confidence")
+    if c:
+        out.append(f"Confidence: {c['level']}" + (f" — {'; '.join(c['gaps'])}" if c.get("gaps") else ""))
+    return out
+
+
 def whatsapp(dr: dict) -> str:
     fa = dr["final_action"]
     head = dr["head_proposal"]
@@ -119,6 +140,7 @@ def whatsapp(dr: dict) -> str:
                                                    " · on hold until setup is complete" if fa.get("on_hold") else " · research only")]
     if head["decision"] != fa["decision"]:
         lines.append(f"Head proposed {head['decision'].upper()}; adjusted by rules.")
+    lines += what_next_lines(fa)
     lines.append(f"Why: {head['summary']}")
     if plan and plan.get("entry_low"):
         lines.append(f"Plan: entry {plan['entry_low']:,.0f}–{plan['entry_high']:,.0f} · stop {plan['stop']:,.0f} · "
@@ -145,6 +167,9 @@ def markdown_report(dr: dict, bundle: dict) -> str:
            f"> {DISCLAIMER}", "",
            f"## Final action: **{decision_text(fa)}** ({'actionable' if fa['actionable'] else 'on hold until setup is complete' if fa.get('on_hold') else 'not actionable'})", "",
            f"Head proposal: **{head['decision'].upper()}** — {head['summary']}", ""]
+    for x in what_next_lines(fa):
+        out.append(f"**{x}**  ")
+    out.append("")
     for a in dr.get("adjustments", []):
         out.append(f"- Adjusted by rules: {a}")
     out += ["", "## Reasons", ""]

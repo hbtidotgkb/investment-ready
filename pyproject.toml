@@ -1,6 +1,6 @@
 [project]
 name = "ca-platform"
-version = "0.7.0"
+version = "0.8.0"
 description = "Personal CA Platform — multi-brain, evidence-cited Indian equity research (personal use; analysis, not investment advice)"
 readme = "README.md"
 requires-python = ">=3.11"

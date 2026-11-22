@@ -32,6 +32,8 @@ METRIC_LABELS = {
     "other_income": "Other income",
     "receivable_days": "Receivable days",
     "contingent_liabilities": "Contingent liabilities",
+    "audit_opinion_unmodified": "Audit opinion unmodified (1 = yes, 0 = modified)",
+    "slippages_cr": "Fresh slippages (banks)",
 }
 
 

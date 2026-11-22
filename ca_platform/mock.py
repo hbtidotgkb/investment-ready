@@ -7,7 +7,7 @@ import asyncio
 import uuid
 
 from .contracts import (BrainReportLLM, Bundle, Check, Cite, CritiqueLLM, HeadDecisionLLM, HeadFinalLLM,
-                        HorizonStance, Objection, ObjectionResponse, Scenario, SettlingTest, Statement)
+                        HorizonStance, Objection, ObjectionResponse, Scenario, SettlingTest, Statement, Trigger)
 from .gateway import CallResult
 from .settings import iso
 
@@ -169,6 +169,8 @@ class MockGateway:
         return r
 
     def _head(self, model):
+        WAIT_TRIGGER = Trigger(kind="event", description="Daily close above the double-bottom neckline on 1.5x average volume "
+                                                         "(pattern confirmed), with the order margin disclosed")
         c = self.b.price.get("close") or 1200
         pat = next((p for p in self.b.patterns if p["name"] == "double_bottom"), None)
         draft = HeadDecisionLLM(
@@ -186,7 +188,7 @@ class MockGateway:
             portfolio_limitations=["Portfolio context missing — research only, not a personalised allocation"])
         if self.loop > 1:  # the Head has seen loop 1 (via <previous_loop>) and the new margin evidence
             draft = draft.model_copy(update={
-                "decision": "wait", "head_score": 50,
+                "decision": "wait", "head_score": 50, "trigger": WAIT_TRIGGER,
                 "summary": "Still wait: loop 2 settled the forensic gaps, but the pattern is unconfirmed and the order margin (~11%) is dilutive.",
                 "reasons": draft.reasons + [Statement(kind="observation", text="Order margin guided to about 11%.", cites=[self.find("expected to be about 11%")])]})
         if model is HeadDecisionLLM:
@@ -203,7 +205,7 @@ class MockGateway:
                                                    explanation="Base case restated on underlying growth; target labelled technical.",
                                                    cites=[self.find("excluding a one-time gain")], decision_effect="assumptions clarified"))
         final = draft if self.loop > 1 else draft.model_copy(update={
-            "decision": "wait", "head_score": 52,
+            "decision": "wait", "head_score": 52, "trigger": WAIT_TRIGGER,
             "summary": "Wait for pattern confirmation before buying; order win is real but margin impact is unknown."})
         return HeadFinalLLM(responses=responses, final=final)
 

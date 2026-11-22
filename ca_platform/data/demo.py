@@ -79,6 +79,7 @@ def _manual_doc(decision_day: date) -> dict:
             {"metric": "debt_to_equity", "value": 0.22, "unit": "x", "period": "fy", "period_end": f"{q_end.year}-03-31", "source": "ar"},
             {"metric": "promoter_holding_pct", "value": 58.4, "unit": "%", "period": "quarter", "period_end": q_end.isoformat(), "source": "shp"},
             {"metric": "promoter_pledge_pct", "value": 0.0, "unit": "%", "period": "quarter", "period_end": q_end.isoformat(), "source": "shp"},
+            {"metric": "audit_opinion_unmodified", "value": 1.0, "unit": "flag", "period": "fy", "period_end": f"{q_end.year}-03-31", "source": "ar"},
         ],
         "notes": [
             {"source": "results", "text": "Net profit growth was 14% year on year, but 6% excluding a one-time gain on sale of land in the current quarter."},

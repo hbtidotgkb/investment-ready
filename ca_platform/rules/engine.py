@@ -96,7 +96,157 @@ def preflight(bundle: Bundle) -> list[dict]:
                   "; ".join(ca_flags) if ca_flags else "No unresolved corporate-action or material data conflicts flagged."))
 
     out.append(pledge_rule(bundle, rc["pledge"]))
+    out.append(gate_rule(evidence_gate(bundle)))
     return out
+
+
+# ------------------------------------------------------------ evidence gate ---
+# Code, not the model, decides whether there is enough evidence to reach a verdict.
+# Critical items depend on the horizon; important items only lower confidence.
+
+RESULT_METRICS = ("eps", "revenue", "total_income", "net_profit_attributable")
+VALUATION_CALCS = ("eps_ttm", "bvps")
+VALUATION_FACTS = ("pe_ttm", "pb", "eps")
+
+
+def _age_days(period_end: str, decision_at: str) -> int:
+    return (date.fromisoformat(decision_at[:10]) - date.fromisoformat(period_end[:10])).days
+
+
+def evidence_gate(bundle: Bundle) -> dict:
+    rc = config("rules")["vetoes"]
+    short = bundle.horizon == "short"
+    items: list[dict] = []
+
+    def item(key, label, ok, detail, how):
+        items.append({"key": key, "label": label, "ok": bool(ok), "detail": detail, "how_to_get": how})
+
+    st = (bundle.surveillance or {}).get("status", "unknown")
+    item("surveillance", "Surveillance status known (NSE ASM/GSM lists)", st in ("listed", "not_listed"),
+         f"status: {st}", "Fetched automatically from NSE each run; if NSE refuses, record it with a source in data/manual/<SYMBOL>.yaml")
+    need = 60 if short else 200
+    bars = len(bundle.candles)
+    item("price_history", f"At least {need} days of daily prices", bars >= need, f"{bars} daily bars in the bundle",
+         "Connect Kite MCP (Portfolio page), or run `ca ingest-bhav --days 260`")
+    if short:
+        tech = [n for n in ("rsi14", "atr14") if (_calc(bundle, n) is None or _calc(bundle, n).result is None)]
+        has_feat = any(e.kind == "computed_feature" and e.title.startswith("Price & technicals") for e in bundle.evidence)
+        ok = has_feat and not tech
+        item("technicals", "Technical analysis computed (candlesticks, chart patterns, support/resistance, RSI/MACD)", ok,
+             "computed" if ok else "missing: " + (", ".join(tech) or "technicals evidence"),
+             "Needs the daily price series; computed automatically once prices load")
+    else:
+        fresh_max = rc["stale_data"].get("quarterly_freshness_days", 100)
+        res = [f for f in bundle.facts if f.metric in RESULT_METRICS and f.status == "available" and f.period_end]
+        latest = max((f.period_end for f in res), default=None)
+        age = _age_days(latest, bundle.decision_at) if latest else None
+        item("results_fresh", f"Latest quarterly results no older than {fresh_max} days",
+             age is not None and age <= fresh_max,
+             f"latest results for the period ended {latest} ({age} days old)" if latest else "no results figures in the bundle",
+             "Read automatically from NSE XBRL filings; if missing, the company may not have filed — add figures in data/manual/<SYMBOL>.yaml")
+        calc_ok = [n for n in VALUATION_CALCS if _calc(bundle, n) is not None and _calc(bundle, n).result is not None]
+        fact_ok = [m for m in VALUATION_FACTS if _fact(bundle, m) is not None]
+        item("valuation_inputs", "EPS or book value computable", calc_ok or fact_ok,
+             ("computed: " + ", ".join(calc_ok + fact_ok)) if (calc_ok or fact_ok) else "neither trailing EPS nor book value could be computed",
+             "Needs four consecutive quarterly filings (EPS) or a balance sheet (book value) on NSE")
+        lb = rc["audit"]["lookback_months"] + 3
+        aud = [f for f in bundle.facts if f.metric == "audit_opinion_unmodified" and f.status == "available"
+               and f.value is not None and f.period_end and _months_between(f.period_end, bundle.decision_at) <= lb]
+        item("audit_opinion", f"Audit opinion from the last {lb} months", aud,
+             (f"{'unmodified' if aud[0].value == 1 else 'MODIFIED'} opinion for the period ended {aud[0].period_end}") if aud
+             else "no audited opinion within the window",
+             "Read from audited results XBRL (annual results); or add it with a source in data/manual/<SYMBOL>.yaml")
+    pl = [f for f in bundle.facts if f.metric == "promoter_pledge_pct" and f.status in ("available", "not_applicable")]
+    item("shareholding", "Shareholding and promoter pledge known", pl,
+         f"as of {max(f.period_end or '' for f in pl)}" if pl else "no shareholding/pledge figures",
+         "Read from the shareholding-pattern XBRL on NSE")
+    missing = [i for i in items if not i["ok"]]
+    return {"horizon": bundle.horizon, "items": items, "complete": not missing, "missing": [i["key"] for i in missing]}
+
+
+def gate_rule(gate: dict) -> dict:
+    if gate["complete"]:
+        return _r("evidence_gate", PASS, f"All {len(gate['items'])} critical evidence items for the {gate['horizon']} horizon are present.")
+    miss = [i for i in gate["items"] if not i["ok"]]
+    return _r("evidence_gate", UNKNOWN, "Critical evidence missing: " + "; ".join(f"{i['label']} ({i['detail']})" for i in miss))
+
+
+def confidence(bundle: Bundle, gate: dict) -> dict:
+    """High, lowered one step per important gap, never below Low. Set by code, not the model."""
+    cov = bundle.coverage or {}
+    gaps: list[str] = []
+    if cov.get("insider_trades") != "available":
+        gaps.append("Insider trades not available (NSE feed)")
+    if cov.get("news") != "available":
+        gaps.append("No news coverage in the bundle")
+    elif cov.get("news_quality") == "press_only":
+        gaps.append("News is press-only — no filed or confirmed events")
+    if bundle.horizon != "short":
+        if _fact(bundle, "contingent_liabilities") is None:
+            gaps.append("Contingent liabilities not found")
+        if cov.get("related_party") != "available":
+            gaps.append("Related-party transaction detail missing")
+        if cov.get("is_bank") and _fact(bundle, "slippages_cr") is None:
+            gaps.append("Bank slippages / restructured book not found")
+    levels = ["high", "medium", "low"]
+    return {"level": levels[min(len(gaps), 2)], "gaps": gaps}
+
+
+RED_FLAG_CHANGE = {
+    "surveillance": "Removal from the NSE surveillance (ASM/GSM) list",
+    "pledge": "Promoter pledge back below the limit and no longer rising",
+    "governance": "Governance score back above the minimum with the severe findings resolved",
+    "audit": "An unmodified audit opinion in the next audited results",
+    "liquidity": "20-day average traded value back above the minimum",
+    "bearish_pattern": "The bearish pattern failing (price recovering above its neckline)",
+}
+
+
+def verdict_problems(head: dict, close: Optional[float], decision_at: str) -> list[str]:
+    """Each verdict must say what happens next. Used to repair the Head's output and checked again in enforce."""
+    d, errs = head.get("decision"), []
+    if d == "wait":
+        t = head.get("trigger")
+        if not t:
+            errs.append("A WAIT must give a trigger: kind 'price' (price_level + direction above/below), 'date' (YYYY-MM-DD) "
+                        "or 'event' (the filing/announcement to wait for), with a plain-words description")
+        elif t.get("kind") == "price":
+            lv, dr = t.get("price_level"), t.get("direction")
+            if not lv or lv <= 0 or dr not in ("above", "below"):
+                errs.append("A price trigger needs price_level > 0 and direction 'above' or 'below'")
+            elif close and ((dr == "below" and lv >= close) or (dr == "above" and lv <= close)):
+                errs.append(f"The price trigger ({dr} {lv}) is already met at the last close {close} — decide buy or avoid instead")
+        elif t.get("kind") == "date":
+            try:
+                days = (date.fromisoformat((t.get("date") or "")[:10]) - date.fromisoformat(decision_at[:10])).days
+                if not 0 < days <= 400:
+                    errs.append("A date trigger must be after the decision date and within about a year")
+            except ValueError:
+                errs.append("A date trigger needs date as YYYY-MM-DD")
+        elif len((t.get("description") or "").strip()) < 15:
+            errs.append("An event trigger must describe the specific filing or announcement to wait for")
+    elif d == "avoid":
+        if not (head.get("avoid_reason") or "").strip():
+            errs.append("An AVOID must state avoid_reason (the specific problem)")
+        if not head.get("would_change_view"):
+            errs.append("An AVOID must list would_change_view (what would make you reconsider)")
+    elif d == "insufficient_data":
+        if len((head.get("insufficiency_reason") or "").strip()) < 20:
+            errs.append("INSUFFICIENT_DATA must state insufficiency_reason naming the specific evidence that is missing or conflicting")
+    return errs
+
+
+def code_trigger(plan: dict, blocking: list[dict], rr_min: float) -> dict:
+    """When the RULES turn a buy into a wait, code states the trigger itself."""
+    t_low, stop = plan.get("target_low"), plan.get("stop")
+    if any(r["rule"] == "reward_risk" for r in blocking) and t_low and stop:
+        lv = math.floor((t_low + rr_min * stop) / (1 + rr_min) * 100) / 100   # round DOWN so reward/risk is met at the level
+        return {"kind": "price", "price_level": lv, "direction": "below", "date": None, "set_by": "code",
+                "description": f"Price at or below Rs {lv:,.2f}, where reward/risk to the target reaches {rr_min}"}
+    first = next((r for r in blocking if not is_setup_gate(r)), blocking[0] if blocking else None)
+    return {"kind": "event", "price_level": None, "direction": None, "date": None, "set_by": "code",
+            "description": (f"Entry condition met: {first['rule'].replace('_', ' ')} — {first['detail']}" if first
+                            else "Entry condition met")}
 
 
 def pledge_rule(bundle: Bundle, rc: dict) -> dict:
@@ -315,6 +465,36 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
     adjustments = []
     actionable = False
     on_hold = None
+    gate = evidence_gate(bundle)
+    conf = confidence(bundle, gate)
+    new_money = bundle.action in ("new_purchase", "additional_purchase")
+    red = [r for r in results if r["rule"] in SUBSTANTIVE and r["result"] == BLOCKED]
+    trigger = head.get("trigger")
+    avoid_reason, would_change = head.get("avoid_reason"), list(head.get("would_change_view") or [])
+    incomplete = None
+    if new_money and red and final_decision != "avoid":
+        # Step 1: a confirmed red flag about the stock means AVOID, whatever the Head proposed.
+        adjustments.append(f"Head proposed {str(final_decision).upper()}; a confirmed red flag about the stock makes it AVOID: "
+                           + "; ".join(f"{r['rule']} — {r['detail']}" for r in red))
+        final_decision, is_buy = "avoid", False
+        avoid_reason = "; ".join(f"{r['rule']}: {r['detail']}" for r in red)
+        would_change = [RED_FLAG_CHANGE.get(r["rule"], f"{r['rule']} resolved") for r in red]
+    elif new_money and not gate["complete"] and final_decision in ("buy", "wait"):
+        # Step 2: critical evidence missing means INSUFFICIENT DATA for a buy or wait (an avoid may stand).
+        adjustments.append(f"Head proposed {final_decision.upper()}; critical evidence is missing, so the result is "
+                           "INSUFFICIENT DATA: " + ", ".join(gate["missing"]))
+        final_decision, is_buy = "insufficient_data", False
+    elif new_money and gate["complete"] and final_decision == "insufficient_data":
+        # Step 3: evidence complete — the Head must decide. A refusal after one send-back leaves the run incomplete.
+        incomplete = {"reason": head.get("insufficiency_reason") or head.get("summary") or "",
+                      "note": "All critical evidence was present, but the Head declined to decide even after being asked again. "
+                              "Review its reason; this run has no valid verdict."}
+        adjustments.append("Evidence checklist complete but the Head did not decide — run marked INCOMPLETE")
+    elif final_decision in ("wait", "avoid"):
+        probs = verdict_problems(head, bundle.price.get("close"), bundle.decision_at)
+        if probs:
+            incomplete = {"reason": "; ".join(probs), "note": "The Head's verdict is missing what must come with it."}
+            adjustments.append("Verdict incomplete: " + "; ".join(probs))
     if is_buy:
         if not blocking:
             actionable = True
@@ -345,10 +525,20 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
         final_decision = "wait"
         adjustments.append(f"Sizing: {sizing.get('detail')}")
 
+    if final_decision == "wait" and not trigger:
+        trigger = code_trigger(plan, blocking, rc["vetoes"]["reward_risk"]["min_short_term"])
+    has_levels = plan.get("entry_low") is not None and plan.get("stop") is not None
+    show_plan = (actionable or on_hold or final_decision == "wait") and (is_buy or (final_decision == "wait" and has_levels))
+    missing = [i for i in gate["items"] if not i["ok"]]
     return {"rule_results": results, "governance": gov, "calculations": calcs, "adjustments": adjustments,
-            "final_action": {"decision": final_decision, "actionable": actionable, "on_hold": on_hold,
-                             "plan": plan if (actionable or on_hold or final_decision == "wait") and is_buy else None,
-                             "sizing": sizing},
+            "final_action": {"decision": final_decision, "actionable": actionable and not incomplete, "on_hold": on_hold,
+                             "plan": plan if show_plan else None, "sizing": sizing,
+                             "trigger": trigger if final_decision == "wait" else None,
+                             "avoid_reason": avoid_reason if final_decision == "avoid" else None,
+                             "would_change_view": would_change if final_decision == "avoid" else [],
+                             "missing_evidence": missing if final_decision == "insufficient_data" and not incomplete else [],
+                             "incomplete": incomplete, "confidence": conf},
+            "evidence_gate": gate,
             "blocking": [r["rule"] for r in blocking]}
 
 

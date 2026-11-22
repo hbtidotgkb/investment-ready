@@ -344,6 +344,7 @@ function renderResults() {
   ${loops.length > 1 ? loopComparison(loops) : ''}
   <div class="card"><div class="verdict">
     <div><div class="decision-box ${esc(fa.decision)}"><div class="small">${isFinal ? 'Permitted action' : `Loop ${dr.loop} result (superseded)`}</div><div class="d">${esc(DECISION_TEXT[fa.decision] || fa.decision)}${fa.on_hold ? ' — on hold' : ''}</div>
+      ${fa.confidence ? `<div style="margin-top:6px"><span class="pill ${fa.confidence.level === 'high' ? 'good' : fa.confidence.level === 'medium' ? 'warn' : 'bad'}" title="${esc((fa.confidence.gaps || []).join('; ') || 'no important gaps')}">Confidence: ${esc(titleCase(fa.confidence.level))}</span></div>` : ''}
       <div class="small" style="margin-top:4px">${fa.actionable ? '✅ Actionable under your rules' : fa.on_hold ? '⏸ The panel and the stock rules say BUY; finish your setup (below) to make it actionable' : 'Research only — not actionable'}</div></div>
       <div class="kv" style="margin-top:12px"><div><span>Last close</span><b>${fmt(dr.price_at_decision)}</b></div><div><span>Head score</span><b>${hp.head_score ?? '—'}</b></div>
       <div><span>Governance</span><b>${dr.governance.score ?? 'withheld'}</b></div><div><span>Evidence</span><b>${esc(hp.evidence_sufficiency || '—')}</b></div></div></div>
@@ -352,6 +353,7 @@ function renderResults() {
         <span class="pill">After critique: ${esc(DECISION_TEXT[hp.decision] || hp.decision)}</span><span class="arrow">→</span>
         <span class="pill ${fa.actionable ? 'good' : 'warn'}">Rules: ${esc(DECISION_TEXT[fa.decision] || fa.decision)}${fa.on_hold ? ' (on hold: setup)' : ''}</span></div>
       <h2>${esc(hp.summary)}</h2>
+      ${whatNext(fa, dr)}
       ${statementsHtml(hpA.reasons)}
       ${dr.adjustments.length ? `<div class="notice" style="margin-top:10px"><b>Adjusted by rules:</b> ${dr.adjustments.map(esc).join('<br>')}</div>` : ''}
       ${blocking.length ? `<h4 style="margin-top:14px">What stands between this and an actionable decision</h4><div class="checklist">${blocking.map((r) => `<div><span class="res ${r.result}">${r.result === 'blocked' ? '✖' : '?'}</span><span><b>${esc(titleCase(r.rule))}</b> — ${esc(r.detail)}<br><span class="muted small">${esc(FIX_HINTS[r.rule] || '')}</span></span></div>`).join('')}</div>` : ''}
@@ -547,9 +549,39 @@ function tabPanel(dr) {
     }).join('')}`;
 }
 
+// The "what happens next" that every verdict must carry (checked in code).
+function whatNext(fa, dr) {
+  const conf = fa.confidence && (fa.confidence.gaps || []).length
+    ? `<div class="small muted" style="margin-top:6px">Confidence ${esc(fa.confidence.level)} because: ${fa.confidence.gaps.map(esc).join(' · ')}</div>` : '';
+  if (fa.incomplete) {
+    return `<div class="notice bad" style="margin-top:10px"><b>Incomplete — no valid verdict.</b> ${esc(fa.incomplete.note)}<br><b>Reason given:</b> ${esc(fa.incomplete.reason || '—')}</div>${conf}`;
+  }
+  if (fa.decision === 'wait' && fa.trigger) {
+    const t = fa.trigger, px = dr.price_at_decision;
+    let gap = '';
+    if (t.kind === 'price' && t.price_level && px) gap = `Now ₹${fmt(px)} · needs a ${fmt(Math.abs(t.price_level / px - 1) * 100, 1)}% ${t.direction === 'below' ? 'fall' : 'rise'}`;
+    if (t.kind === 'date' && t.date) gap = `${Math.max(0, Math.round((new Date(t.date) - new Date(dr.decision_at)) / 864e5))} days from the decision date`;
+    return `<div class="notice info" style="margin-top:10px"><b>⏳ Wait until:</b> ${esc(t.description)}${t.kind === 'price' && t.price_level ? ` <b>(${esc(t.direction)} ₹${fmt(t.price_level)})</b>` : ''}${t.kind === 'date' && t.date ? ` <b>(${esc(t.date)})</b>` : ''}
+      ${gap ? `<div class="small">${gap}</div>` : ''}${t.set_by === 'code' ? '<div class="small muted">Trigger set by the rules (the Head proposed buy).</div>' : ''}<div class="small muted">When it happens, run the analysis again.</div></div>${conf}`;
+  }
+  if (fa.decision === 'avoid') {
+    return `<div class="notice bad" style="margin-top:10px"><b>Why avoid:</b> ${esc(fa.avoid_reason || '—')}
+      ${(fa.would_change_view || []).length ? `<div class="small" style="margin-top:4px"><b>Would change the view:</b> ${fa.would_change_view.map(esc).join(' · ')}</div>` : ''}</div>${conf}`;
+  }
+  if (fa.decision === 'insufficient_data' && (fa.missing_evidence || []).length) {
+    return `<div class="notice" style="margin-top:10px"><b>Missing critical evidence:</b><ul class="small">${fa.missing_evidence.map((m) => `<li><b>${esc(m.label)}</b> — ${esc(m.detail)}<br><span class="muted">How to get it: ${esc(m.how_to_get)}</span></li>`).join('')}</ul></div>${conf}`;
+  }
+  return conf;
+}
+
 function tabRules(dr) {
-  const g = dr.governance, c = dr.calculations || {};
-  return `<p class="muted small">Deterministic rules from <code>config/rules.yaml</code> (${esc(dr.versions.rules)}). Unknown inputs never pass silently.</p>
+  const g = dr.governance, c = dr.calculations || {}, gate = dr.evidence_gate;
+  return `${gate ? `<h4>How the verdict was reached</h4>
+    <ol class="small"><li><b>Red flags about the stock</b> (surveillance, pledge, audit, governance, liquidity, bearish pattern) → Avoid.</li>
+      <li><b>Critical evidence for the ${esc(gate.horizon)} horizon</b> — ${gate.complete ? 'all present, so the Head had to decide' : 'missing items → Insufficient data'}:
+        <div class="checklist" style="margin:6px 0">${gate.items.map((i) => `<div><span class="res ${i.ok ? 'pass' : 'unknown'}">${i.ok ? '✔' : '?'}</span><span><b>${esc(i.label)}</b> — ${esc(i.detail)}${i.ok ? '' : `<br><span class="muted">${esc(i.how_to_get)}</span>`}</span></div>`).join('')}</div></li>
+      <li><b>Panel verdict</b> — Buy, Wait (with trigger) or Avoid${dr.head_refusals ? ` · the Head was sent back ${dr.head_refusals === 1 ? 'once' : 'and refused again'}` : ''}.</li></ol>` : ''}
+  <p class="muted small">Deterministic rules from <code>config/rules.yaml</code> (${esc(dr.versions.rules)}). Unknown inputs never pass silently.</p>
   <div class="tbl-wrap"><table><thead><tr><th>Rule</th><th>Result</th><th>Detail</th><th>Phase</th></tr></thead><tbody>${dr.rule_results.map((r) => `<tr><td><b>${esc(titleCase(r.rule))}</b></td><td><span class="res ${esc(r.result)}">${esc(r.result)}</span></td><td>${esc(r.detail)}</td><td class="small muted">${esc(r.phase || 'final')}</td></tr>`).join('')}</tbody></table></div>
   <div class="grid g2" style="margin-top:14px"><div><h4>Governance (code rubric ${esc(g.rubric)})</h4><p>Score <b>${g.score ?? 'withheld'}</b> · coverage ${(g.coverage * 100).toFixed(0)}% · penalty ${g.penalty}<br><span class="small muted">${esc(g.note)}</span></p></div>
   <div><h4>Calculations</h4><pre class="wa">${esc(JSON.stringify(c, null, 1))}</pre></div></div>
