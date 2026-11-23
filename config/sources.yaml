@@ -4,6 +4,7 @@ version: sources@1
 
 tiers:
   T1_official:          {label: "Official / exchange", weight: 1.0, description: "Exchange filings, regulator, company disclosures"}
+  T2_licensed_data:     {label: "Licensed research data", weight: 0.9, description: "LSEG Stock Reports Plus PDF you saved (via ETPrime): consensus estimates, revisions, broker ratings. Third-party data and opinion, cross-checked by code"}
   T2_reputable_press:   {label: "Reputable financial press", weight: 0.8, description: "Established newsrooms with editorial standards"}
   T3_other_press:       {label: "Other press", weight: 0.5, description: "Recognised outlets with weaker financial-desk standards"}
   T4_capture_unverified: {label: "User capture (unverified)", weight: 0.6, description: "Browser capture / PDF; attributed, not verified"}
@@ -74,3 +75,17 @@ rss_feeds:
 
 # Google News RSS search, filtered to registry domains above (headline + publisher + date only)
 google_news_rss: true
+
+# Any PDFs you save to data/sr_plus/<SYMBOL>/ (SR Plus, broker reports, annual reports, transcripts…).
+user_documents:
+  max_model_pages_per_document: 40   # image-only pages beyond this are not read (text-layer pages are always read, free)
+  model_pages_per_call: 6
+  chars_per_document: 30000          # most relevant pages kept per document for the panel
+  chars_total: 90000                 # across all non-SR-Plus documents of one stock
+
+# LSEG Stock Reports Plus PDFs among them (printed from ETPrime).
+sr_plus:
+  warn_after_days: 14     # older reports are used but flagged as stale
+  max_age_days: 30        # older reports are shown but not given to the panel
+  close_tolerance_pct: 3.0
+  pe_tolerance_pct: 15.0  # LSEG vs filings P/E; bases can differ (consolidated/standalone, EPS definition)

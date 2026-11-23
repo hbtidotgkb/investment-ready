@@ -400,7 +400,8 @@ def to_evidence(fac: EvidenceFactory, snap: dict, fund: dict, company: str) -> t
         passages.append(f"Data flag: {fl}.")
     ins = snap.get("insider_trades") or {}
     if ins.get("status") == "unavailable":
-        passages.append(f"Insider trades: not available — {ins['reason']}")
+        passages.append(f"Insider trades: not available — {ins['reason']} Not counted as an evidence gap: judge promoter "
+                        "behaviour from the filed pledge and holding changes instead.")
     comp = fac.add(kind="computed_fundamental", title="Valuation & fundamentals (computed from filings)",
                    publisher="ca_platform fundamentals", tier="SYS_computed", passages=passages or ["No fundamentals could be computed."],
                    retrieved_via="filings:nse_xbrl", notes=f"Computed by {CODE_VERSION} only from the XBRL filings in this bundle.")

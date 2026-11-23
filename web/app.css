@@ -115,6 +115,13 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .pill.info { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .tier { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; border: 1px solid currentColor; white-space: nowrap; }
 .tier.T1_official { color: var(--t1); } .tier.T2_reputable_press { color: var(--t2); } .tier.T3_other_press { color: var(--t3); }
+.tier.T2_licensed_data { color: var(--t2); }
+.sr-scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.sr-scores > div { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.sr-scores b { font-size: 1.6em; display: block; }
+.sr-scores .good b { color: var(--good); } .sr-scores .warn b { color: var(--warn); } .sr-scores .bad b { color: var(--bad); }
+.sr-dist { display: grid; grid-template-columns: 90px 1fr 32px; gap: 4px 8px; align-items: center; font-size: .9em; }
+.sr-dist i { display: block; height: 10px; border-radius: 3px; background: var(--accent); }
 .tier.T4_capture_unverified { color: var(--t4); } .tier.T5_aggregator { color: var(--t5); } .tier.SYS_computed { color: var(--tsys); } .tier.DEMO_synthetic { color: var(--tdemo); }
 
 /* run header */

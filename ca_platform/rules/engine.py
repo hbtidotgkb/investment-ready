@@ -172,11 +172,15 @@ def gate_rule(gate: dict) -> dict:
 
 
 def confidence(bundle: Bundle, gate: dict) -> dict:
-    """High, lowered one step per important gap, never below Low. Set by code, not the model."""
+    """High, lowered one step per important gap, never below Low. Set by code, not the model.
+    Insider trades are not a gap: NSE's feed is broken, and promoter pledge/holding from filings covers most of it."""
     cov = bundle.coverage or {}
     gaps: list[str] = []
-    if cov.get("insider_trades") != "available":
-        gaps.append("Insider trades not available (NSE feed)")
+    sr = cov.get("sr_plus", "missing")
+    if sr == "stale":
+        gaps.append("SR Plus report is stale — save a fresh one")
+    elif sr != "available":
+        gaps.append("No usable SR Plus report (analyst consensus, estimate revisions)")
     if cov.get("news") != "available":
         gaps.append("No news coverage in the bundle")
     elif cov.get("news_quality") == "press_only":

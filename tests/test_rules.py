@@ -250,7 +250,7 @@ def test_rules_made_wait_gets_a_code_trigger(capital):
 
 
 def test_confidence_is_set_by_code():
-    b = _bundle(horizon="medium", coverage={"insider_trades": "available", "news": "available", "related_party": "available"})
+    b = _bundle(horizon="medium", coverage={"sr_plus": "available", "news": "available", "related_party": "available"})
     facts = b.facts + [FinancialFact(id="c", metric="contingent_liabilities", value=5.0, status="available", period_end="2026-03-31")]
     assert R.confidence(b.model_copy(update={"facts": facts}), {})["level"] == "high"
     one = R.confidence(b, {})
@@ -258,3 +258,14 @@ def test_confidence_is_set_by_code():
     assert R.confidence(_bundle(horizon="medium"), {})["level"] == "low"       # several gaps; never below low
     bank = b.model_copy(update={"facts": facts, "coverage": dict(b.coverage, is_bank=True)})
     assert "Bank slippages / restructured book not found" in R.confidence(bank, {})["gaps"]
+
+
+def test_confidence_ignores_insider_trades_and_counts_sr_plus():
+    cov = {"news": "available", "related_party": "available"}
+    facts = [FinancialFact(id="c", metric="contingent_liabilities", value=5.0, status="available", period_end="2026-03-31")]
+    with_sr = _bundle(horizon="medium", coverage=cov | {"sr_plus": "available", "insider_trades": "unavailable"})
+    assert R.confidence(with_sr.model_copy(update={"facts": with_sr.facts + facts}), {})["level"] == "high"
+    stale = _bundle(horizon="medium", coverage=cov | {"sr_plus": "stale"})
+    assert R.confidence(stale.model_copy(update={"facts": stale.facts + facts}), {})["gaps"] == ["SR Plus report is stale — save a fresh one"]
+    none = _bundle(horizon="short", coverage={"news": "available"})
+    assert R.confidence(none, {})["gaps"] == ["No usable SR Plus report (analyst consensus, estimate revisions)"]

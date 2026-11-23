@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------- evidence ---
 
-Tier = Literal["T1_official", "T2_reputable_press", "T3_other_press", "T4_capture_unverified",
+Tier = Literal["T1_official", "T2_licensed_data", "T2_reputable_press", "T3_other_press", "T4_capture_unverified",
                "T5_aggregator", "SYS_computed", "DEMO_synthetic"]
 
 EvidenceKind = Literal["price_series", "computed_feature", "chart_pattern", "exchange_filing",
                        "exchange_announcement", "news_article", "web_search_citation",
                        "browser_capture", "pdf", "manual_fact", "aggregator", "company_profile", "news_summary",
-                       "computed_fundamental"]
+                       "computed_fundamental", "broker_research"]
 
 
 class Passage(BaseModel):
