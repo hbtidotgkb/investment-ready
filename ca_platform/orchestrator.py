@@ -96,7 +96,7 @@ def previous_loop_block(rec: dict) -> dict:
 
 
 async def run_analysis(symbol: str, horizon: str = "medium", action: str = "new_purchase",
-                       mode: str = "live", run_id: str | None = None, loops: int = 1) -> dict:
+                       mode: str = "live", run_id: str | None = None, loops: int = 1, batch_api: bool = False) -> dict:
     led = get_ledger()
     run_id = run_id or f"run-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     ev = REGISTRY.get(run_id) or RunEvents(run_id, persist=led.add_event)
@@ -106,7 +106,7 @@ async def run_analysis(symbol: str, horizon: str = "medium", action: str = "new_
     decision_at = iso()
     led.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [run_id, symbol, mode, horizon, action, decision_at, None, "running", None, None, None, 0.0,
-                 json.dumps(config_versions() | {"loops": loops}), None])
+                 json.dumps(config_versions() | {"loops": loops, "batch_api": bool(batch_api and mode == "live")}), None])
     ev.emit("run_start", None, f"Analysing {symbol} ({horizon} horizon, {mode} mode, {loops} loop{'s' if loops > 1 else ''})",
             "running", {"symbol": symbol, "horizon": horizon, "action": action, "mode": mode, "decision_at": decision_at,
                         "loops": loops})
@@ -120,7 +120,9 @@ async def run_analysis(symbol: str, horizon: str = "medium", action: str = "new_
             budget = Budget(led)
             reserve = float(config("user")["budget"]["per_run_reservation_usd"]) * loops
             budget.reserve(reserve)
-            gw = Gateway(led, run_id, log=ev.log)
+            gw = Gateway(led, run_id, log=ev.log, batch_api=batch_api)
+            if batch_api:
+                ev.log("context", "Batch API mode: model calls are queued at half price; this run can take a few hours")
         carry: dict | None = None
         records: list[dict] = []
         total_cost, unknown_calls = 0.0, 0
@@ -179,10 +181,38 @@ def _issue(led, run_id: str, dr: dict) -> None:
                  dr["head_proposal"].get("summary"), run_id])
 
 
+async def _discover(ev, led, gw_live, fac, stage, purpose, symbol, decision_at, loop, targeted, domains, max_uses,
+                    prompt) -> list:
+    """Search-grounded discovery; incremental when an earlier day's search for this stock can be extended."""
+    from . import discovery_log as DL
+    p = DL.plan(led, symbol, purpose, decision_at, loop)
+    user = prompt + targeted
+    if p["mode"] == "incremental":
+        user = prompt + DL.incremental_note(p, decision_at[:10])
+        ev.log(stage, f"Searching only for what is new since {p['since']} (full search on {p['base']}; "
+               f"{len(DL.known_sources(p))} earlier source(s) carried forward)")
+    sys_p, _ = system_prompt("discovery")
+    out = await gw_live.web_discovery(role="discovery", stage=stage, system=sys_p, allowed_domains=domains,
+                                      user=user, max_uses=max_uses)
+    if loop == 1:
+        DL.record(led, symbol, purpose, decision_at, p["mode"], out)
+    if p["mode"] == "incremental":
+        new = len({c["url"] for c in out.get("citations") or []})
+        out, first_seen = DL.merged(p, out, decision_at[:10])
+        ev.log(stage, f"Incremental search found {new} new source(s)")
+        return from_discovery(fac, out, purpose, decision_at, first_seen)
+    return from_discovery(fac, out, purpose, decision_at)
+
+
 async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decision_at, loop, loops, carry, gw_live):
+    # Spend is counted from the start of the loop so document reads (SR Plus, PDFs) and discovery are included.
+    live_cost_start = getattr(gw_live, "total_cost", 0.0)
+    live_unknown_start = getattr(gw_live, "unknown_cost_calls", 0)
     fac = EvidenceFactory()
     nd_info: dict = {}
     fin_info: dict = {}
+    sr_info: dict = {"status": "missing", "used": False, "reason": "DEMO runs do not read SR Plus reports"}
+    user_docs: list[dict] = []
     flags: list[str] = []
     today = date.fromisoformat(decision_at[:10])
     asked = carry.get("open_questions", []) if carry else []
@@ -360,6 +390,39 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         except Exception as e:
             ev.log("filings", f"Filed financials unavailable ({type(e).__name__}: {str(e)[:120]}) — Forensic/Quant will see the gap")
             flags.append("Filed financials (NSE XBRL) unavailable for this run")
+        # The user's PDFs for this stock (data/sr_plus/<SYMBOL>/): SR Plus reports + any other documents.
+        from .data import docs as docs_mod
+        from .data import sr_plus as sr_mod
+        our_pe = next((m["value"] for m in fin_info.get("metrics", []) if m["name"] == "pe_ttm"), None)
+        found = await docs_mod.collect(symbol, company, decision_at, gw_live, lambda m: ev.log("filings", m),
+                                       our_close=feats.get("close"), our_pe=our_pe)
+        sr_info = found["sr_plus"]
+        user_docs = docs_mod.add_documents(fac, found, symbol)
+        ev.log("filings", f"Your PDFs in {found['folder']}: {len(found['files'])} file(s)"
+               + (f" — {sum(d['used'] for d in user_docs)} other document(s) used" if user_docs else ""))
+        for d in user_docs:
+            m_ = d["meta"]
+            ev.log("filings", f"Document {d['file']}: {docs_mod.TYPE_LABEL[m_['document_type']].lower()}"
+                   + (f" dated {m_['document_date']}" if m_.get("document_date") else "")
+                   + f" — {'used' if d['used'] else 'not used'} ({d['reason']}); {d['pages_read']}/{d['pages_total']} pages read")
+        for e_ in found["errors"]:
+            ev.log("filings", f"Document not read: {e_}")
+            flags.append(f"Your PDF not read: {e_}")
+        if sr_info["used"]:
+            sr_ev = sr_mod.to_evidence(fac, sr_info, symbol)
+            sr_info["evidence_id"] = sr_ev.id
+            ok = sum(c["ok"] for c in sr_info["checks"])
+            ev.log("filings", f"SR Plus report dated {sr_info['report_date']} ({sr_info['file']}): {sr_info['status']} · "
+                   f"{ok}/{len(sr_info['checks'])} report figures recompute · consensus "
+                   f"{(sr_info['data'].get('ibes_mean') or 'n/a').replace('_', ' ')}, mean target {sr_info['data'].get('target_mean') or 'n/a'}")
+        else:
+            ev.log("filings", f"SR Plus: {sr_info['status']} — {sr_info['reason']}")
+        for w in sr_info.get("warnings", []):
+            ev.log("filings", f"SR Plus warning: {w}")
+            if sr_info["used"]:
+                flags.append(f"SR Plus: {w}")
+        if sr_info["status"] == "stale":
+            flags.append(f"SR Plus: {sr_info['reason']}")
         from .newsdesk import pipeline as nd_pipeline
         if nd_pipeline.is_fresh(symbol):
             ev.log("filings", "Newsdesk: data is fresh (kept current by the background worker) — no refetch")
@@ -388,15 +451,13 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
             facts = facts + [f for f in x_facts if (f.metric, f.period_end) not in manual_keys]
         if gw_live.available:
             try:
-                sys_p, _ = system_prompt("discovery")
-                out = await gw_live.web_discovery(
-                    role="discovery", stage="filings", system=sys_p,
-                    allowed_domains=config("sources")["filings_search_domains"],
-                    user=(f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find the latest quarterly and annual "
-                          f"results (revenue, net profit attributable to owners, exceptional items, operating cash flow), auditor "
-                          f"opinion or auditor changes, promoter pledge and shareholding changes, and any regulatory actions. "
-                          f"Only information published on or before {decision_at[:10]}." + targeted), max_uses=4)
-                made = from_discovery(fac, out, "filings", decision_at)
+                made = await _discover(
+                    ev, led, gw_live, fac, "filings", "filings", symbol, decision_at, loop, targeted,
+                    config("sources")["filings_search_domains"], 4,
+                    f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find the latest quarterly and annual "
+                    f"results (revenue, net profit attributable to owners, exceptional items, operating cash flow), auditor "
+                    f"opinion or auditor changes, promoter pledge and shareholding changes, and any regulatory actions. "
+                    f"Only information published on or before {decision_at[:10]}.")
                 ev.log("filings", f"Filings discovery: {len(made)} sources with verbatim cited passages")
             except Exception as e:
                 ev.log("filings", f"Filings discovery failed ({type(e).__name__}: {str(e)[:120]})")
@@ -432,14 +493,12 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         nd_info["quality"] = q
         if gw_live.available:
             try:
-                sys_p, _ = system_prompt("discovery")
-                out = await gw_live.web_discovery(
-                    role="discovery", stage="news", system=sys_p, allowed_domains=config("sources")["news_search_domains"],
-                    user=(f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find material news and exchange "
-                          f"announcements from the last 90 days: results, orders, guidance, management changes, regulatory or legal "
-                          f"matters, block deals, rating changes, and broker views. Only items published on or before {decision_at[:10]}."
-                          + targeted), max_uses=5)
-                made = from_discovery(fac, out, "news", decision_at)
+                made = await _discover(
+                    ev, led, gw_live, fac, "news", "news", symbol, decision_at, loop, targeted,
+                    config("sources")["news_search_domains"], 5,
+                    f"Company: {company} (NSE: {symbol}). Decision date {decision_at[:10]}. Find material news and exchange "
+                    f"announcements from the last 90 days: results, orders, guidance, management changes, regulatory or legal "
+                    f"matters, block deals, rating changes, and broker views. Only items published on or before {decision_at[:10]}.")
                 ev.log("news", f"Search discovery: {len(made)} sources with verbatim cited passages")
             except Exception as e:
                 ev.log("news", f"Search discovery failed ({type(e).__name__}: {str(e)[:120]})")
@@ -497,6 +556,8 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "exchange_filings": "available" if any(e.tier == "T1_official" and e.kind in ("exchange_filing", "exchange_announcement")
                                                for e in fac.items) else "missing",
         "browser_captures": n_caps,
+        "sr_plus": sr_info["status"],
+        "user_documents": sum(d["used"] for d in user_docs),
         "insider_trades": ((fin_info.get("insider_trades") or {}).get("status") or "unknown") if fin_info else "unknown",
         "related_party": "available" if (fin_info.get("rpt") or {}).get("rows") else "missing",
         "is_bank": bool(fin_info.get("is_bank")),
@@ -541,8 +602,8 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
            {"bundle_id": b.bundle_id, "evidence": len(b.evidence), "new_evidence": new_ev, "preflight": pre,
             "coverage": coverage, "quality_flags": flags})
     gw: Any = MockGateway(led, run_id, b, log=ev.log, loop=loop) if mode == "demo" else gw_live
-    cost_before = getattr(gw, "total_cost", 0.0)
-    unknown_before = getattr(gw, "unknown_cost_calls", 0)
+    cost_before = live_cost_start if gw is gw_live else getattr(gw, "total_cost", 0.0)
+    unknown_before = live_unknown_start if gw is gw_live else getattr(gw, "unknown_cost_calls", 0)
 
     # ------------------------------------------------------------- brains ---
     roles = [("quant", "quant"), ("news", "news_brain"), ("forensic", "forensic")]
@@ -737,6 +798,8 @@ async def _loop(ev: RunEvents, led, run_id, symbol, horizon, action, mode, decis
         "asked_questions": asked,
         "newsdesk": nd_info,
         "fundamentals": fin_info,
+        "sr_plus": sr_info,
+        "user_documents": user_docs,
         "evidence_gate": enf.get("evidence_gate"),
         "head_refusals": refusals,
         "evaluation_contract": {"id": None, "horizon": horizon, **config("horizons")["evaluation"],

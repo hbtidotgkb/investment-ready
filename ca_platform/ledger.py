@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS capture_queue (queue_id VARCHAR PRIMARY KEY, url VARC
   symbol VARCHAR, note VARCHAR, status VARCHAR, created_at VARCHAR, updated_at VARCHAR, source_id VARCHAR,
   version INTEGER, error VARCHAR);
 ALTER TABLE capture_queue ADD COLUMN IF NOT EXISTS kind VARCHAR DEFAULT 'article';
+ALTER TABLE request_records ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER DEFAULT 0;
+ALTER TABLE request_records ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER DEFAULT 0;
+ALTER TABLE request_records ADD COLUMN IF NOT EXISTS batch_api BOOLEAN DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS discovery_log (symbol VARCHAR, purpose VARCHAR, day VARCHAR, kind VARCHAR,
+  created_at VARCHAR, out JSON, PRIMARY KEY (symbol, purpose, day));
+CREATE TABLE IF NOT EXISTS report_reuse (role VARCHAR, symbol VARCHAR, config_hash VARCHAR, run_id VARCHAR,
+  day VARCHAR, created_at VARCHAR, model VARCHAR, stable JSON, ids JSON, report JSON);
 CREATE TABLE IF NOT EXISTS idea_mentions (mention_id VARCHAR PRIMARY KEY, source_id VARCHAR, version INTEGER,
   symbol VARCHAR, created_at VARCHAR, method VARCHAR, body JSON);
 CREATE TABLE IF NOT EXISTS batches (batch_id VARCHAR PRIMARY KEY, created_at VARCHAR, status VARCHAR,

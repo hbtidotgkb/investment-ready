@@ -47,7 +47,8 @@ class MockGateway:
     def role_cfg(self, role):
         return {"model": "mock-demo", "prompt": f"{role}@2.0.0"}
 
-    async def structured(self, *, role, stage, system, user, output_model, semantic_check=None):
+    async def structured(self, *, role, stage, system, user, output_model, semantic_check=None, cache_prefix=None,
+                         reuse_key=None):
         self.log(stage, f"DEMO: scripted {role} output (no model call, $0.00)")
         await asyncio.sleep({"quant": 2.2, "news": 2.8, "forensic": 3.4, "head": 2.0, "critic": 2.4}.get(role, 1.0))
         obj = getattr(self, f"_{role}")(output_model)
@@ -58,7 +59,9 @@ class MockGateway:
                "served_model": "mock-demo", "prompt_version": f"{role}@2.0.0", "input_tokens": len(user) // 4,
                "output_tokens": len(obj.model_dump_json()) // 4, "cost_usd": 0.0, "price_known": True, "latency_ms": 0,
                "cache_hit": False, "created_at": iso(), "attempts": [{"attempt": 0, "errors": errs}]}
-        self.ledger.execute("INSERT INTO request_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        self.ledger.execute("INSERT INTO request_records (request_id, run_id, role, model, prompt_version, request_hash, "
+                            "provider_request_id, input_tokens, output_tokens, web_searches, cost_usd, latency_ms, status, "
+                            "created_at, request, response) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             [rec["request_id"], self.run_id, role, "mock-demo", rec["prompt_version"], "demo", None,
                              rec["input_tokens"], rec["output_tokens"], 0, 0.0, 0, "ok", iso(), "{}", obj.model_dump_json()])
         return CallResult(parsed=obj, record=rec)

@@ -13,6 +13,7 @@ Guarantees (identical for Anthropic and OpenAI roles):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -35,6 +36,10 @@ class LLMUnavailable(RuntimeError):
     pass
 
 
+class BatchUnavailable(RuntimeError):
+    """The Batch API could not answer this request; the caller falls back to a standard call."""
+
+
 class CallResult(BaseModel):
     parsed: Any = None
     text: str = ""
@@ -46,16 +51,27 @@ def price_of(model: str) -> dict | None:
     return config("models")["pricing_usd_per_mtok"].get(model)
 
 
-def cost_of(model: str, usage: Any, web_searches: int = 0) -> tuple[float, bool]:
-    """(usd, price_known). Unknown prices return 0.0 with price_known=False — never a guess."""
+def cache_tokens(usage: Any) -> tuple[int, int]:
+    """(cache_read, cache_write) input tokens from a usage object (0 when absent)."""
+    return (getattr(usage, "cache_read_input_tokens", 0) or 0, getattr(usage, "cache_creation_input_tokens", 0) or 0)
+
+
+def cost_of(model: str, usage: Any, web_searches: int = 0, batch: bool = False) -> tuple[float, bool]:
+    """(usd, price_known). Unknown prices return 0.0 with price_known=False — never a guess.
+
+    Cache writes are 1.25x input (5-minute cache); cache reads use the model's own `cache_read` price
+    from config (0.05x input on Opus/Sonnet 5.5, 0.1x on most others). The Batch API halves every
+    token price; the per-search fee is not discounted."""
     p = price_of(model)
     if not p:
         return 0.0, False
     inp = getattr(usage, "input_tokens", 0) or 0
-    cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cr, cw = cache_tokens(usage)
     out = getattr(usage, "output_tokens", 0) or 0
-    usd = (inp * p["input"] + cw * p["input"] * 1.25 + cr * p["input"] * 0.1 + out * p["output"]) / 1e6
+    read_price = p.get("cache_read", p["input"] * 0.1)
+    usd = (inp * p["input"] + cw * p["input"] * 1.25 + cr * read_price + out * p["output"]) / 1e6
+    if batch:
+        usd *= 0.5
     usd += web_searches * config("models")["pricing_usd_per_mtok"].get("web_search_per_1k", 10.0) / 1000
     return round(usd, 6), True
 
@@ -100,10 +116,13 @@ class Budget:
 
 
 class Gateway:
-    def __init__(self, ledger: Ledger, run_id: str, log: Callable[[str, str], None] | None = None):
+    def __init__(self, ledger: Ledger, run_id: str, log: Callable[[str, str], None] | None = None,
+                 batch_api: bool = False):
         self.ledger = ledger
         self.run_id = run_id
         self.log = log or (lambda stage, msg: None)
+        # Anthropic calls go through the Message Batches API (half price, results within hours).
+        self.batch_api = batch_api
         self.cfg = config("models")
         self.total_cost = 0.0
         self.unknown_cost_calls = 0
@@ -127,6 +146,43 @@ class Gateway:
             raise LLMUnavailable(f"Unsupported provider {provider!r}")
         self._clients[provider] = c
         return c
+
+    async def _batch_message(self, stage: str, params: dict) -> tuple[Any, str]:
+        """One request through the Message Batches API (50% of standard token prices).
+
+        Returns (message, batch_id). Most batches end within an hour, at most 24 hours. Any failure
+        (request rejected, errored, expired, canceled) raises BatchUnavailable so the caller can
+        make a standard call instead of failing the run."""
+        import anthropic
+        client = self.client("anthropic")
+        cid = f"r-{uuid.uuid4().hex[:16]}"
+        try:
+            batch = await client.messages.batches.create(requests=[{"custom_id": cid, "params": params}])
+        except anthropic.APIError as e:
+            raise BatchUnavailable(f"Batch API rejected the request ({type(e).__name__}: {str(e)[:160]})") from e
+        self.log(stage, f"Queued in the Batch API at half price (batch {batch.id}); answers usually arrive within an hour")
+        t0, delay, last_note = time.monotonic(), 10.0, time.monotonic()
+        while batch.processing_status != "ended":
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 90.0)
+            try:
+                batch = await client.messages.batches.retrieve(batch.id)
+            except (anthropic.APIConnectionError, anthropic.RateLimitError, anthropic.InternalServerError):
+                continue  # transient; keep polling
+            if time.monotonic() - last_note > 600:
+                last_note = time.monotonic()
+                self.log(stage, f"Still waiting on batch {batch.id} ({(time.monotonic() - t0) / 60:.0f} min so far)")
+        async for item in await client.messages.batches.results(batch.id):
+            if item.custom_id != cid:
+                continue
+            r = item.result
+            if r.type == "succeeded":
+                return r.message, batch.id
+            detail = getattr(getattr(r, "error", None), "error", None)
+            raise BatchUnavailable(f"Batch {batch.id} returned '{r.type}'"
+                                   + (f" ({getattr(detail, 'type', '')}: {str(getattr(detail, 'message', ''))[:160]})"
+                                      if detail else ""))
+        raise BatchUnavailable(f"Batch {batch.id} ended without a result for this request")
 
     def available_for(self, role: str) -> bool:
         return bool(get_secret(PROVIDER_KEYS[role_provider(role)]))
@@ -154,8 +210,11 @@ class Gateway:
                "web_searches": kw.get("web_searches", 0), "cost_usd": cost,
                "latency_ms": kw.get("latency_ms", 0), "status": kw["status"], "created_at": iso(),
                "request": json.dumps(kw.get("request"), default=str, ensure_ascii=False),
-               "response": json.dumps(kw.get("response"), default=str, ensure_ascii=False)}
-        self.ledger.execute("INSERT INTO request_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               "response": json.dumps(kw.get("response"), default=str, ensure_ascii=False),
+               "cache_read_tokens": kw.get("cache_read_tokens", 0), "cache_write_tokens": kw.get("cache_write_tokens", 0),
+               "batch_api": bool(kw.get("batch_api", False))}
+        cols = list(rec)
+        self.ledger.execute(f"INSERT INTO request_records ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                             list(rec.values()))
         if cost is None and kw["status"] == "ok":
             self.unknown_cost_calls += 1
@@ -171,12 +230,23 @@ class Gateway:
     # ------------------------------------------------------ structured ---
     async def structured(self, *, role: str, stage: str, system: str, user: str,
                          output_model: Type[BaseModel],
-                         semantic_check: Callable[[BaseModel], list[str]] | None = None) -> CallResult:
-        """Structured call with Pydantic + semantic validation and bounded repair, any provider."""
+                         semantic_check: Callable[[BaseModel], list[str]] | None = None,
+                         documents: list[dict] | None = None, cache_prefix: str | None = None,
+                         reuse_key: str | None = None) -> CallResult:
+        """Structured call with Pydantic + semantic validation and bounded repair, any provider.
+
+        `documents` (Anthropic only): [{"title", "sha256", "data" (base64 PDF)}]. The stored request
+        and the cache key carry the file hash, never the file itself.
+        `cache_prefix`: leading part of `user` that a later call repeats byte for byte (Head draft ->
+        Head final). Anthropic caches it, so the repeat is billed at the cache-read price.
+        `reuse_key`: replaces `user` in the request hash only, so an earlier valid answer to the same
+        input is reused even when per-run labels in the text (run timestamp, bundle id) differ."""
         rc = self.role_cfg(role)
         provider = rc.get("provider", "anthropic")
         model, effort, max_tokens = rc["model"], rc.get("effort", "high"), rc.get("max_tokens", 16000)
         self.client(provider)  # fail fast with a clear message if the key is missing
+        if documents and provider != "anthropic":
+            raise LLMUnavailable(f"{role} reads PDF documents and must use the anthropic provider")
         messages: list[dict] = [{"role": "user", "content": user}]
         attempts = 1 + int(self.cfg.get("max_validation_repairs", 2))
         last_errors: list[str] = []
@@ -185,22 +255,47 @@ class Gateway:
             request = {"provider": provider, "model": model, "effort": effort, "max_tokens": max_tokens,
                        "system": system, "messages": messages, "schema": output_model.__name__,
                        "prompt_version": rc["prompt"]}
-            rhash = canonical_hash(request)
+            if documents:
+                request["documents"] = [{"title": d["title"], "sha256": d["sha256"]} for d in documents]
+            key_request = request if reuse_key is None else dict(
+                request, messages=[{"role": "user", "content": reuse_key}] + messages[1:])
+            rhash = canonical_hash(key_request)
             cached = self._cached(rhash)
             if cached:
                 resp = json.loads(cached["response"])
                 parsed = output_model.model_validate(resp["parsed"])
                 rec = dict(cached, cache_hit=True, provider=provider, served_model=resp.get("served_model", model),
                            cost_usd=0.0, price_known=True)
-                self.log(stage, f"Cache hit for identical request ({rhash[:10]}…) — no new model call")
+                if cached.get("run_id") and cached["run_id"] != self.run_id:
+                    self.log(stage, f"Reusing the {role} answer from run {cached['run_id']} ({cached['created_at'][:16]}): "
+                             f"same evidence, same day, same model and prompt — no new model call")
+                else:
+                    self.log(stage, f"Cache hit for identical request ({rhash[:10]}…) — no new model call")
             else:
                 self.log(stage, f"Calling {provider}:{model} (effort={effort}, prompt {rc['prompt']})"
-                         + (f" — repair attempt {attempt}" if attempt else ""))
+                         + (f" — repair attempt {attempt}" if attempt else "")
+                         + (" via the Batch API (half price)" if self.batch_api and provider == "anthropic" else ""))
                 call = self._call_anthropic if provider == "anthropic" else self._call_openai
-                parsed, rec = await call(role, request, rhash, system, messages, model, effort, max_tokens, output_model)
+                api_messages = messages
+                if provider == "anthropic" and (documents or cache_prefix):
+                    first = messages[0]["content"]
+                    blocks = [{"type": "document", "title": d["title"][:250],
+                               "source": {"type": "base64", "media_type": "application/pdf", "data": d["data"]}}
+                              for d in (documents or [])]
+                    if cache_prefix and first.startswith(cache_prefix) and len(first) > len(cache_prefix):
+                        blocks += [{"type": "text", "text": cache_prefix, "cache_control": {"type": "ephemeral"}},
+                                   {"type": "text", "text": first[len(cache_prefix):]}]
+                    else:
+                        blocks.append({"type": "text", "text": first})
+                    api_messages = [{"role": "user", "content": blocks}] + messages[1:]
+                parsed, rec = await call(role, request, rhash, system, api_messages, model, effort, max_tokens, output_model,
+                                         stage=stage)
                 cost_txt = f"${rec['cost_usd']:.4f}" if rec["price_known"] else "cost unknown (add pricing in config/models.yaml)"
+                cr, cw = rec.get("cache_read_tokens", 0), rec.get("cache_write_tokens", 0)
                 self.log(stage, f"Response in {rec['latency_ms']/1000:.1f}s · {rec['input_tokens']:,} in / "
-                         f"{rec['output_tokens']:,} out tokens · {cost_txt}"
+                         f"{rec['output_tokens']:,} out tokens"
+                         + (f" · {cr:,} read from cache" if cr else "") + (f" · {cw:,} written to cache" if cw else "")
+                         + f" · {cost_txt}"
                          + (f" · served by fallback {rec['served_model']}" if rec.get("fallback") else ""))
             errors: list[str] = []
             if parsed is None:
@@ -225,17 +320,41 @@ class Gateway:
                 ]
         raise ValueError(f"{role}: output still invalid after {attempts} attempt(s): " + "; ".join(last_errors[:5]))
 
-    async def _call_anthropic(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model):
+    async def _call_anthropic(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model,
+                              stage: str = "gateway"):
         import anthropic
         t0 = time.monotonic()
         base = dict(role=role, model=model, prompt_version=request["prompt_version"], request_hash=rhash,
                     request=request, provider="anthropic")
+        resp, batch_id = None, None
         try:
-            resp = await self.client("anthropic").beta.messages.parse(
-                model=model, max_tokens=max_tokens, system=system, messages=messages,
-                output_config={"effort": effort}, output_format=output_model,
-                betas=[FALLBACK_BETA], fallbacks="default",
-            )
+            if self.batch_api:
+                from anthropic.lib._parse._transform import to_json_output_format  # the schema parse() sends
+                try:
+                    resp, batch_id = await self._batch_message(stage, dict(
+                        model=model, max_tokens=max_tokens, system=system, messages=messages,
+                        output_config={"effort": effort, "format": to_json_output_format(output_model)}))
+                    if resp.stop_reason == "refusal":  # Batches cannot carry the refusal fallback
+                        self.log(stage, "Batch answer was a refusal — re-asking at standard price with the refusal fallback")
+                        rc_, rw_ = cache_tokens(resp.usage)
+                        self._record(**base, status="refused", provider_request_id=batch_id,
+                                     input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens,
+                                     cost_usd=cost_of(model, resp.usage, batch=True)[0], cache_read_tokens=rc_,
+                                     cache_write_tokens=rw_, batch_api=True, latency_ms=int((time.monotonic() - t0) * 1000),
+                                     response={"stop_reason": "refusal", "batch_id": batch_id})
+                        resp, batch_id = None, None
+                except BatchUnavailable as e:
+                    self.log(stage, f"{e} — making a standard-price call instead")
+            if resp is None:
+                resp = await self.client("anthropic").beta.messages.parse(
+                    model=model, max_tokens=max_tokens, system=system, messages=messages,
+                    output_config={"effort": effort}, output_format=output_model,
+                    betas=[FALLBACK_BETA], fallbacks="default",
+                )
+                parsed = getattr(resp, "parsed_output", None)
+            else:
+                text = next((b.text for b in resp.content if b.type == "text"), "")
+                parsed = output_model.model_validate_json(text) if resp.stop_reason != "max_tokens" else None
         except (anthropic.BadRequestError, anthropic.AuthenticationError, anthropic.PermissionDeniedError,
                 anthropic.NotFoundError) as e:
             self._record(**base, status="error", response={"error": str(e)}, latency_ms=int((time.monotonic() - t0) * 1000))
@@ -251,24 +370,27 @@ class Gateway:
         if served != model:
             fallback = {"configured": model, "served": served, "role": role}
             self.fallback_events.append(fallback)
-        cost, known = cost_of(served if price_of(served) else model, resp.usage)
-        parsed = getattr(resp, "parsed_output", None)
+        cost, known = cost_of(served if price_of(served) else model, resp.usage, batch=batch_id is not None)
+        cr, cw = cache_tokens(resp.usage)
         error = None
         if resp.stop_reason == "refusal":
             parsed, error = None, f"Model declined (refusal: {getattr(resp.stop_details, 'category', None)})"
         elif resp.stop_reason == "max_tokens":
             parsed, error = None, "Output truncated at max_tokens"
-        rec = self._record(**base, provider_request_id=getattr(resp, "_request_id", None),
+        rec = self._record(**base, provider_request_id=batch_id or getattr(resp, "_request_id", None),
                            input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens, cost_usd=cost,
                            price_known=known, latency_ms=latency, status="ok" if parsed is not None else "invalid",
                            response={"parsed": parsed.model_dump() if parsed is not None else None,
-                                     "stop_reason": resp.stop_reason, "served_model": served},
-                           served_model=served, fallback=fallback)
+                                     "stop_reason": resp.stop_reason, "served_model": served,
+                                     **({"batch_id": batch_id} if batch_id else {})},
+                           served_model=served, fallback=fallback, cache_read_tokens=cr, cache_write_tokens=cw,
+                           batch_api=batch_id is not None)
         if error:
             rec["error"] = error
         return parsed, rec
 
-    async def _call_openai(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model):
+    async def _call_openai(self, role, request, rhash, system, messages, model, effort, max_tokens, output_model,
+                           stage: str = "gateway"):
         """OpenAI Responses API with Pydantic structured output (strict JSON schema)."""
         import openai
         t0 = time.monotonic()
@@ -371,16 +493,36 @@ class Gateway:
         self.log(stage, f"Search-grounded discovery with {model} on {len(allowed_domains)} allow-listed domains")
         t0 = time.monotonic()
         content: list = []
-        usage_in = usage_out = searches = 0
+        usage_in = usage_out = searches = c_read = c_write = 0
+        cost_parts: list[tuple[Any, bool]] = []
         served = model
         resp = None
+        batch_ids: list[str] = []
         for _ in range(4):  # handle pause_turn continuation
-            resp = await client.beta.messages.create(
-                model=model, max_tokens=rc.get("max_tokens", 16000), system=system, messages=messages,
-                tools=tools, output_config={"effort": effort}, betas=[FALLBACK_BETA], fallbacks="default")
+            resp, bid = None, None
+            if self.batch_api:
+                try:
+                    resp, bid = await self._batch_message(stage, dict(
+                        model=model, max_tokens=rc.get("max_tokens", 16000), system=system, messages=messages,
+                        tools=tools, output_config={"effort": effort}))
+                    if resp.stop_reason == "refusal":
+                        self.log(stage, "Batch answer was a refusal — re-asking at standard price with the refusal fallback")
+                        cost_parts.append((resp.usage, True))
+                        resp, bid = None, None
+                except BatchUnavailable as e:
+                    self.log(stage, f"{e} — making a standard-price call instead")
+            if resp is None:
+                resp = await client.beta.messages.create(
+                    model=model, max_tokens=rc.get("max_tokens", 16000), system=system, messages=messages,
+                    tools=tools, output_config={"effort": effort}, betas=[FALLBACK_BETA], fallbacks="default")
+            if bid:
+                batch_ids.append(bid)
+            cost_parts.append((resp.usage, bid is not None))
             served = resp.model or model
             usage_in += resp.usage.input_tokens
             usage_out += resp.usage.output_tokens
+            r_, w_ = cache_tokens(resp.usage)
+            c_read, c_write = c_read + r_, c_write + w_
             stu = getattr(resp.usage, "server_tool_use", None)
             searches += getattr(stu, "web_search_requests", 0) or 0
             content.extend(resp.content)
@@ -403,14 +545,20 @@ class Gateway:
                 if isinstance(b.content, list):
                     for r in b.content:
                         results.append({"url": r.url, "title": r.title, "page_age": getattr(r, "page_age", None)})
-        usage = type("U", (), {"input_tokens": usage_in, "output_tokens": usage_out})()
-        cost, known = cost_of(model, usage, searches)
+        cost, known = 0.0, True
+        for u, in_batch in cost_parts:  # each continuation priced at its own tier (batch or standard)
+            c, k = cost_of(model, u, batch=in_batch)
+            cost, known = cost + c, known and k
+        cost += cost_of(model, None, searches)[0] if known else 0.0   # per-search fee, never discounted
         out = {"text": "\n".join(text_parts), "citations": cited, "results": results,
-               "served_model": served, "stop_reason": resp.stop_reason if resp else None}
+               "served_model": served, "stop_reason": resp.stop_reason if resp else None,
+               **({"batch_ids": batch_ids} if batch_ids else {})}
         rec = self._record(role=role, model=model, prompt_version=rc["prompt"], request_hash=rhash,
-                           provider_request_id=getattr(resp, "_request_id", None), input_tokens=usage_in,
-                           output_tokens=usage_out, web_searches=searches, cost_usd=cost, price_known=known,
-                           latency_ms=latency, status="ok", request=request, response=out, served_model=served)
+                           provider_request_id=(batch_ids[-1] if batch_ids else getattr(resp, "_request_id", None)),
+                           input_tokens=usage_in, output_tokens=usage_out, web_searches=searches,
+                           cost_usd=round(cost, 6), price_known=known, latency_ms=latency, status="ok", request=request,
+                           response=out, served_model=served, cache_read_tokens=c_read, cache_write_tokens=c_write,
+                           batch_api=bool(batch_ids))
         self.log(stage, f"{searches} searches, {len(results)} results, {len(cited)} cited passages · ${rec['cost_usd']:.4f}")
         return out | {"record": rec}
 

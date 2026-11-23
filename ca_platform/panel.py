@@ -158,8 +158,25 @@ async def run_brain(gw, role: str, b: Bundle, pre: list[dict], idx: CitationInde
     user, omitted = brain_view(role, b, pre, [])
     gw.log(stage, f"Prepared role view: {user.count('<evidence ')} evidence items, {len(user):,} chars"
            + (f", {len(omitted)} omitted for length" if omitted else ""))
+    from . import reuse as RU
+    led = getattr(gw, "ledger", None)
+    # Across days: reuse the last report while nothing material for this role has changed (see reuse.py).
+    if led is not None:
+        hit = RU.find(led, role, b, sys_p, brain_checker(role, idx))
+        if hit:
+            rep, info = hit
+            gw.log(stage, f"Reusing the {role} report from run {info['run_id']} ({info['day']}): no new filings, "
+                          f"announcements or other {role} evidence since, and all {info['ids_repointed']} cited "
+                          f"item(s) are unchanged in today's evidence — no new model call")
+            return rep, ver, {"provider": "anthropic", "served_model": info["model"], "model": info["model"],
+                              "cost_usd": 0.0, "price_known": True, "cache_hit": True, "reused_from": info["run_id"]}
+    # Same day + same evidence => reuse the earlier report instead of paying again. The bundle id (it
+    # hashes ingest times) and the run's clock time are the only per-run labels in an unchanged view.
+    reuse = user.replace(b.bundle_id, "<bundle>").replace(b.decision_at, b.decision_at[:10])
     res = await gw.structured(role=role, stage=stage, system=sys_p, user=user, output_model=BrainReportLLM,
-                              semantic_check=brain_checker(role, idx))
+                              semantic_check=brain_checker(role, idx), reuse_key=reuse)
+    if led is not None and not res.record.get("cache_hit"):
+        RU.store(led, role, b, gw.run_id, sys_p, res.parsed, res.record.get("served_model") or res.record.get("model", ""))
     return res.parsed, ver, res.record
 
 
@@ -174,6 +191,8 @@ async def run_head_draft(gw, b, pre, prior, calcs, rblock, panel_view, idx, stag
     sys_p, ver = system_prompt("head")
     user = head_inputs(b, pre, prior, calcs, rblock, panel_view, prev_loop) + extra + (
         f"\nWrite your DRAFT decision for the {b.horizon} horizon as the required JSON object.")
+    # No prompt-cache marker: draft and final ask for different JSON schemas, the schema sits in the
+    # cached prefix, so the final call never read the draft's cache (measured 23 Nov 2026) — only paid the write.
     res = await gw.structured(role="head", stage=stage, system=sys_p, user=user, output_model=HeadDecisionLLM,
                               semantic_check=head_checker(idx, b))
     return res.parsed, ver, res.record

@@ -277,15 +277,22 @@ async def _prices(symbols: list[str]) -> tuple[dict[str, float], str]:
 TASKS: set = set()
 
 
-def start_batch(symbols: list[str], horizon: str, loops: int, mode: str, source: str = "ideas", ideas_snapshot=None) -> str:
+def start_batch(symbols: list[str], horizon: str, loops: int, mode: str, source: str = "ideas", ideas_snapshot=None,
+                batch_api: bool | None = None) -> str:
     from .orchestrator import run_analysis
     from .settings import now_ist
     syms = [s.upper().strip() for s in symbols if s.strip()][:10]
     bid = f"batch-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
     items = [{"symbol": s, "run_id": f"run-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}", "status": "queued"} for s in syms]
-    params = {"horizon": horizon, "loops": loops, "mode": mode, "source": source, "ideas": ideas_snapshot or []}
+    icfg = config("user").get("ideas") or {}
+    # Batch API: every model call at half price, answers within hours instead of minutes.
+    batch_api = bool(icfg.get("batch_api", True) if batch_api is None else batch_api) and mode == "live"
+    params = {"horizon": horizon, "loops": loops, "mode": mode, "source": source, "ideas": ideas_snapshot or [],
+              "batch_api": batch_api}
     get_ledger().execute("INSERT INTO batches VALUES (?,?,?,?,?,?)", [bid, iso(), "running", json.dumps(params), json.dumps(items), None])
-    conc = max(1, int((config("user").get("ideas") or {}).get("batch_concurrency", 1)))
+    conc = max(1, int(icfg.get("batch_concurrency", 1)))
+    if batch_api:  # queued calls don't compete for rate limits, so stocks wait on the queue side by side
+        conc = max(conc, int(icfg.get("batch_api_concurrency", 5)))
 
     async def runner():
         sem = asyncio.Semaphore(conc)
@@ -293,7 +300,8 @@ def start_batch(symbols: list[str], horizon: str, loops: int, mode: str, source:
         async def one(it):
             async with sem:
                 _set_item(bid, it["run_id"], "running")
-                r = await run_analysis(it["symbol"], horizon, "new_purchase", mode, run_id=it["run_id"], loops=loops)
+                r = await run_analysis(it["symbol"], horizon, "new_purchase", mode, run_id=it["run_id"], loops=loops,
+                                       batch_api=batch_api)
                 _set_item(bid, it["run_id"], r.get("status", "failed"))
         await asyncio.gather(*(one(it) for it in items))
         path = write_batch_report(bid)

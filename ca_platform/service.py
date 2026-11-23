@@ -151,6 +151,9 @@ ROLE_HELP = {
     "claims": "Inbox claim extraction",
     "discovery": "Evidence discovery (Claude web search, allow-listed domains)",
     "research_qa": "Research Q&A over captures (Claude Citations API)",
+    "sr_plus": "Reads SR Plus PDFs from data/sr_plus/<SYMBOL>/ (once per file; code then checks the numbers)",
+    "doc_classify": "Identifies each PDF in data/sr_plus/<SYMBOL>/ (type, company, date) from its first pages",
+    "doc_pages": "Transcribes image-only pages of your other stock PDFs (pages with a text layer are read by code)",
 }
 
 
@@ -247,6 +250,7 @@ class RunRequest(BaseModel):
     action: str = "new_purchase"
     mode: str = "live"
     loops: int = 1
+    batch_api: bool = False   # half price via Anthropic's Batch API; answers take up to a few hours
 
 
 def _start(req: RunRequest) -> str:
@@ -261,7 +265,8 @@ def _start(req: RunRequest) -> str:
     from .settings import now_ist
     import uuid
     run_id = f"run-{now_ist():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
-    t = asyncio.create_task(run_analysis(req.symbol, req.horizon, req.action, req.mode, run_id=run_id, loops=req.loops))
+    t = asyncio.create_task(run_analysis(req.symbol, req.horizon, req.action, req.mode, run_id=run_id, loops=req.loops,
+                                         batch_api=req.batch_api and req.mode == "live"))
     TASKS.add(t)
     t.add_done_callback(TASKS.discard)
     return run_id
@@ -288,7 +293,8 @@ def get_run(run_id: str):
     v = led.fetchone("SELECT body FROM verdicts WHERE run_id=?", [run_id])
     b = led.fetchone("SELECT body FROM bundles WHERE bundle_id=?", [run["bundle_id"]]) if run["bundle_id"] else None
     calls = led.fetchall("SELECT request_id, role, model, prompt_version, input_tokens, output_tokens, web_searches, cost_usd, "
-                         "latency_ms, status, created_at, provider_request_id FROM request_records WHERE run_id=? ORDER BY created_at", [run_id])
+                         "latency_ms, status, created_at, provider_request_id, cache_read_tokens, cache_write_tokens, batch_api "
+                         "FROM request_records WHERE run_id=? ORDER BY created_at", [run_id])
     loops = [json.loads(r["body"]) for r in led.fetchall("SELECT body FROM loop_records WHERE run_id=? ORDER BY loop", [run_id])]
     bundles = {}
     for lr in loops:
@@ -468,6 +474,51 @@ async def fundamentals_get(symbol: str, price: Optional[float] = None):
     return await asyncio.to_thread(fundamentals.report, symbol, price)
 
 
+def _sym(symbol: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9&\-]{1,20}", symbol):
+        raise HTTPException(400, "bad symbol")
+    return symbol.upper()
+
+
+async def _stock_docs(symbol: str, read: bool) -> dict:
+    from .data import docs, nse
+    from .settings import iso
+    sym = _sym(symbol)
+    m = nse.lookup(sym)
+    gw = None
+    if read:
+        if missing_keys(["sr_plus", "doc_classify", "doc_pages"]):
+            raise HTTPException(400, "Reading new PDFs needs ANTHROPIC_API_KEY")
+        gw = Gateway(get_ledger(), f"docs-{sym}-{iso()[:19]}")
+    found = await docs.collect(sym, m["name"] if m else None, iso(), gw)
+    for d in found["documents"]:
+        d.pop("_rec", None)
+    return found | {"symbol": sym}
+
+
+@app.get("/api/docs/{symbol}")
+async def docs_get(symbol: str):
+    """Your PDFs for a stock (data/sr_plus/<SYMBOL>/): already-read files only; no model call."""
+    return await _stock_docs(symbol, read=False)
+
+
+@app.post("/api/docs/{symbol}/read")
+async def docs_read(symbol: str):
+    """Read any PDFs never read before (model calls recorded in the ledger; cached per file)."""
+    return await _stock_docs(symbol, read=True)
+
+
+@app.get("/api/docs/{symbol}/file/{name}")
+def docs_file(symbol: str, name: str):
+    from fastapi.responses import FileResponse
+
+    from .data import docs
+    pdf = next((p for p in docs.pdfs(_sym(symbol)) if p.name == name), None)
+    if pdf is None:
+        raise HTTPException(404, "no such SR Plus PDF for this stock")
+    return FileResponse(pdf, media_type="application/pdf", filename=pdf.name, content_disposition_type="inline")
+
+
 @app.get("/api/newsdesk/progress/{symbol}")
 def nd_progress(symbol: str):
     from .newsdesk import progress
@@ -537,6 +588,7 @@ class BatchRequest(BaseModel):
     loops: int = 1
     mode: str = "live"
     ideas: list[dict] = []
+    batch_api: Optional[bool] = None   # None = config default (user.yaml ideas.batch_api)
 
 
 @app.post("/api/batches")
@@ -556,7 +608,7 @@ async def batch_start(req: BatchRequest):
         if rem < need:
             raise HTTPException(400, f"Budget: this batch reserves about ${need:.2f} but ${rem:.2f} remains this month")
     snap = [{"symbol": i.get("symbol"), "why": i.get("why"), "score": i.get("score")} for i in req.ideas][:10]
-    return {"batch_id": ideas.start_batch(syms, req.horizon, req.loops, req.mode, "ideas", snap)}
+    return {"batch_id": ideas.start_batch(syms, req.horizon, req.loops, req.mode, "ideas", snap, batch_api=req.batch_api)}
 
 
 @app.get("/api/batches")

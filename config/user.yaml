@@ -18,6 +18,9 @@ analysis:
   default_loops: 1                       # loops per run (UI lets you pick 1..max_loops)
   max_loops: 3                           # each loop re-fetches all evidence; cost scales with loops
   max_view_chars: 400000                 # evidence text one brain may read (~100k tokens); more ET captures fit
+  discovery_full_every_days: 14          # web-search discovery: full 90-day search at least this often; in between, search only what's new
+  reuse_reports_across_days: [forensic]  # reuse these analysts' last report while nothing material for them changed (reuse.py)
+  reuse_max_days: 14                     # never reuse a report older than this
 
 display:
   top_sources: 8                         # "best sources" shown on the verdict (5..10)
@@ -31,6 +34,8 @@ ideas:
   max_idea_articles: 20                  # stock-idea article list (you asked for ~10)
   default_top: 8                         # best ideas shown (5..10)
   batch_concurrency: 1                   # panel analyses run at once in a batch (raise carefully: cost/rate limits)
+  batch_api: true                        # multi-stock batches use Anthropic's Batch API: half price, results in up to a few hours
+  batch_api_concurrency: 5               # stocks waiting on the Batch API at once (no rate-limit pressure while queued)
 
 service:
   host: 127.0.0.1                        # loopback only (spec N14)

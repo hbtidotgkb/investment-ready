@@ -17,6 +17,9 @@ from .contracts import Bundle, Evidence
 from .settings import PROMPTS, config
 
 
+SHARED_PROMPT = "_shared@2.1.0"
+
+
 @lru_cache(maxsize=None)
 def load_prompt(ref: str) -> tuple[str, dict]:
     """ref = 'quant@2.0.0' -> (body, front_matter)."""
@@ -33,7 +36,7 @@ def load_prompt(ref: str) -> tuple[str, dict]:
 def system_prompt(role: str) -> tuple[str, str]:
     """Shared policy + role prompt. Returns (system, prompt_version)."""
     ref = config("models")["roles"][role]["prompt"]
-    shared, _ = load_prompt("_shared@2.0.0")
+    shared, _ = load_prompt(SHARED_PROMPT)
     body, meta = load_prompt(ref)
     return f"{shared}\n\n{body}", meta.get("version", ref)
 
@@ -42,11 +45,11 @@ def system_prompt(role: str) -> tuple[str, str]:
 
 ROLE_KINDS = {
     "quant": {"price_series", "computed_feature", "chart_pattern", "manual_fact", "exchange_filing", "company_profile",
-              "news_summary", "exchange_announcement", "computed_fundamental"},
+              "news_summary", "exchange_announcement", "computed_fundamental", "broker_research", "pdf"},
     "news": {"news_article", "web_search_citation", "exchange_announcement", "browser_capture", "pdf",
-             "company_profile", "computed_feature", "news_summary"},
+             "company_profile", "computed_feature", "news_summary", "broker_research"},
     "forensic": {"exchange_filing", "manual_fact", "exchange_announcement", "company_profile", "web_search_citation",
-                 "news_summary", "news_article", "browser_capture", "computed_fundamental"},
+                 "news_summary", "news_article", "browser_capture", "computed_fundamental", "pdf"},
 }
 # Newsdesk items carry retrieved_via "newsdesk:<source>:<event_type>"; narrow them per remit.
 FORENSIC_PRESS_TYPES = ("governance_flag", "accounting_concern", "regulatory_action", "insider_pledge", "litigation")
@@ -103,13 +106,19 @@ def context_block(b: Bundle, pre: list[dict], prior: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def brain_view(role: str, b: Bundle, pre: list[dict], prior: list[dict]) -> tuple[str, list[str]]:
-    """User message for a specialist. Returns (text, omitted_evidence_ids)."""
+def role_items(role: str, b: Bundle) -> list[Evidence]:
+    """The evidence items a specialist is allowed to see (before the length cap)."""
     kinds, excl = ROLE_KINDS[role], ROLE_EXCLUDE_VIA[role]
     items = [e for e in b.evidence if e.kind in kinds and e.retrieved_via not in excl and e.usage_status != "excluded"
              and _role_allows(role, e)]
     if role == "news":  # News sees only the return/price-reaction slice of computed features
         items = [e for e in items if e.kind != "computed_feature" or e.title.startswith("Price reaction")]
+    return items
+
+
+def brain_view(role: str, b: Bundle, pre: list[dict], prior: list[dict]) -> tuple[str, list[str]]:
+    """User message for a specialist. Returns (text, omitted_evidence_ids)."""
+    items = role_items(role, b)
     rendered, omitted, total = [], [], 0
     cap = int((config("user").get("analysis") or {}).get("max_view_chars", MAX_VIEW_CHARS))
     for e in items:
@@ -173,7 +182,8 @@ def panel_bundle_view(b: Bundle, reports_obj) -> str:
     whole = {w[:-2] for w in want if w.endswith(":*")}
     keep: set[str] = set()
     for e in b.evidence:
-        core = e.kind in ("computed_feature", "chart_pattern", "company_profile", "news_summary") or e.tier == "T1_official"
+        core = (e.kind in ("computed_feature", "chart_pattern", "company_profile", "news_summary", "broker_research")
+                or e.tier == "T1_official")
         for p in e.passages:
             if core or p.id in want or e.id in whole:
                 keep.add(p.id)

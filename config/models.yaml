@@ -14,14 +14,20 @@ providers:
 locked_roles:
   discovery: anthropic     # Claude web search with allowed_domains + verbatim cited_text
   research_qa: anthropic   # Citations API over custom-content documents
+  sr_plus: anthropic       # reads the SR Plus PDF (image pages) as a document
+  doc_classify: anthropic  # identifies each of your stock PDFs from its first pages
+  doc_pages: anthropic     # transcribes image-only PDF pages
 
 # USD per million tokens. Verify against provider pricing pages; add any model you select.
 # Calls on a model with no price here are recorded with cost "unknown" and flagged in the UI.
+# cache_read = price of a prompt-cache hit (checked 23 Nov 2026: 0.05x input on Opus/Sonnet 5.5,
+# 0.025x on Fable 5.2, 0.1x on Haiku 5.5). Cache writes are 1.25x input. Batch API halves all token prices.
+# Haiku 5.5 prompts over 100K tokens cost more ($0.50 / $2.50); not modelled here.
 pricing_usd_per_mtok:
-  claude-opus-5-5:   {input: 4.00, output: 20.00}
-  claude-sonnet-5-5: {input: 2.00, output: 10.00}
-  claude-haiku-5-5:  {input: 0.10, output: 0.50}
-  claude-fable-5-2:  {input: 8.00, output: 40.00}
+  claude-opus-5-5:   {input: 4.00, output: 20.00, cache_read: 0.20}
+  claude-sonnet-5-5: {input: 2.00, output: 10.00, cache_read: 0.10}
+  claude-haiku-5-5:  {input: 0.10, output: 0.50, cache_read: 0.01}
+  claude-fable-5-2:  {input: 8.00, output: 40.00, cache_read: 0.20}
   web_search_per_1k: 10.00
 
 # Suggested models shown when a provider key is missing (live lists load from each provider's
@@ -32,14 +38,17 @@ suggested_models:
 
 roles:
   discovery:   {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 16000, prompt: discovery@2.0.0}
-  quant:       {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: quant@2.1.0}
-  news:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: news@2.0.0}
-  forensic:    {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: forensic@2.1.0}
-  head:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: head@2.3.0}
-  critic:      {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: critic@2.1.0}
+  quant:       {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: quant@2.2.0}
+  news:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: news@2.1.0}
+  forensic:    {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: forensic@2.2.0}
+  head:        {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: head@2.4.0}
+  critic:      {provider: anthropic, model: claude-opus-5-5, effort: high, max_tokens: 16000, prompt: critic@2.2.0}
   research_qa: {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: research_qa@2.0.0}
   claims:      {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: claims@2.0.0}
   ideas:       {provider: anthropic, model: claude-opus-5-5, effort: low,  max_tokens: 8000,  prompt: ideas@1.0.0}
+  sr_plus:     {provider: anthropic, model: claude-opus-5-5, effort: medium, max_tokens: 32000, prompt: sr_plus@2.0.0}
+  doc_classify: {provider: anthropic, model: claude-sonnet-5-5, effort: low, max_tokens: 2000, prompt: doc_classify@1.0.0}
+  doc_pages:   {provider: anthropic, model: claude-sonnet-5-5, effort: low, max_tokens: 16000, prompt: doc_pages@1.0.0}
 
 # Bounded validation repairs per spec §11 "Validation and retries"
 max_validation_repairs: 2

@@ -71,8 +71,11 @@ def pattern_passage(pt: dict) -> str:
             f"pattern stop Rs {fmt(pt['pattern_stop'])}, {vol}, quality {pt['quality']}.")
 
 
-def from_discovery(fac: EvidenceFactory, out: dict, purpose: str, decision_at: str) -> list[Evidence]:
-    """Group API citations by URL; passages are the verbatim cited_text from the source."""
+def from_discovery(fac: EvidenceFactory, out: dict, purpose: str, decision_at: str,
+                   first_seen: dict[str, str] | None = None) -> list[Evidence]:
+    """Group API citations by URL; passages are the verbatim cited_text from the source.
+    `first_seen` (url -> YYYY-MM-DD) marks sources carried forward from an earlier day's search."""
+    first_seen = first_seen or {}
     by_url: dict[str, dict] = {}
     ages = {r["url"]: r.get("page_age") for r in out.get("results", [])}
     for c in out.get("citations", []):
@@ -84,8 +87,12 @@ def from_discovery(fac: EvidenceFactory, out: dict, purpose: str, decision_at: s
     for url, d in by_url.items():
         tier = tier_for(url)
         kind = "exchange_filing" if tier == "T1_official" else "web_search_citation"
+        day = first_seen.get(url)
+        earlier = day is not None and day < decision_at[:10]
         made.append(fac.add(kind=kind, title=d["title"] or url, publisher=domain_of(url), tier=tier, url=url,
-                            passages=d["texts"], published_hint=ages.get(url), first_seen_at=decision_at,
+                            passages=d["texts"], published_hint=ages.get(url),
+                            first_seen_at=day if earlier else decision_at,
                             retrieved_via=f"discovery:{purpose}",
-                            notes="Passages are verbatim cited_text returned by the search API."))
+                            notes="Passages are verbatim cited_text returned by the search API."
+                            + (f" Found by the search on {day}; carried forward." if earlier else "")))
     return made

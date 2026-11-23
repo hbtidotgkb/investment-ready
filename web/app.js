@@ -91,7 +91,7 @@ async function refreshHealth() {
 async function viewHome() {
   await refreshHealth();
   const h = HEALTH || { panel_missing_keys: ['ANTHROPIC_API_KEY'], analysis: { default_loops: 1, max_loops: 3 }, vendor_separation: {} };
-  const st = { horizon: 'medium', mode: h.panel_missing_keys.length ? 'demo' : 'live', action: 'new_purchase', loops: h.analysis.default_loops };
+  const st = { horizon: 'medium', mode: h.panel_missing_keys.length ? 'demo' : 'live', action: 'new_purchase', loops: h.analysis.default_loops, price: 'std' };
   const runs = await api('/api/runs?limit=6');
   const vs = h.vendor_separation || {};
   $('#app').innerHTML = `
@@ -109,6 +109,8 @@ async function viewHome() {
           <div><label>Mode</label><div class="seg" id="md"><button type="button" data-v="live">Live</button><button type="button" data-v="demo">Demo</button></div></div>
           <div><label title="Each extra loop re-fetches all evidence, searches for the previous loop's open questions, and re-runs the panel">Analysis loops ⓘ</label><div class="seg" id="lp">
             ${Array.from({ length: h.analysis.max_loops }, (_, i) => `<button type="button" data-v="${i + 1}">${i + 1}</button>`).join('')}</div></div>
+          <div><label title="Half price queues every model call in Anthropic's Batch API: same models, prompts and checks; the verdict usually arrives within an hour or two, at most several hours">Price ⓘ</label><div class="seg" id="px">
+            <button type="button" data-v="std">Standard · minutes</button><button type="button" data-v="half">Half price · hours</button></div></div>
         </div>
         <div><label for="act">Intended action</label>
           <select id="act"><option value="new_purchase">New purchase</option><option value="additional_purchase">Add to position</option>
@@ -133,7 +135,9 @@ async function viewHome() {
   <div class="card"><div class="row"><h3 style="margin:0">Recent runs</h3><span class="spacer"></span><a href="#/runs">All runs →</a></div>${runsTable(runs)}</div>`;
   const est = () => {
     $('#est').textContent = st.mode === 'demo' ? `Demo: fictional company, no model calls, $0 · ${st.loops} loop(s)`
-      : `Live: about ${8 * st.loops} model calls and up to ${9 * st.loops} web searches over ${st.loops} loop(s); budget reserved first`;
+      : `Live: about ${8 * st.loops} model calls and up to ${9 * st.loops} web searches over ${st.loops} loop(s); budget reserved first`
+        + (st.price === 'half' ? ' · half price: results in up to a few hours — you can close this tab and come back' : '');
+    $('#px').parentElement.style.display = st.mode === 'demo' ? 'none' : '';
     $('#sym').disabled = st.mode === 'demo';
     $('#sym').placeholder = st.mode === 'demo' ? 'DEMOCO (fictional)' : 'e.g. TCS, INFY, HDFCBANK';
   };
@@ -145,7 +149,7 @@ async function viewHome() {
   };
   const sym = $('#sym'), sug = $('#sug');
   try { const pre = sessionStorage.getItem('ca-sym'); if (pre) { sym.value = pre; sessionStorage.removeItem('ca-sym'); st.mode = 'live'; } } catch (e) { /* ignore */ }
-  seg('#hz', 'horizon'); seg('#md', 'mode'); seg('#lp', 'loops', true); est();
+  seg('#hz', 'horizon'); seg('#md', 'mode'); seg('#lp', 'loops', true); seg('#px', 'price'); est();
   let tmr;
   sym.oninput = () => {
     clearTimeout(tmr);
@@ -163,7 +167,7 @@ async function viewHome() {
     if (st.mode === 'live' && !sym.value.trim()) { toast('Enter an NSE symbol'); return; }
     $('#go').disabled = true;
     try {
-      const r = await api('/api/runs', { method: 'POST', body: { symbol: sym.value.trim().toUpperCase(), horizon: st.horizon, action: st.action, mode: st.mode, loops: st.loops } });
+      const r = await api('/api/runs', { method: 'POST', body: { symbol: sym.value.trim().toUpperCase(), horizon: st.horizon, action: st.action, mode: st.mode, loops: st.loops, batch_api: st.mode === 'live' && st.price === 'half' } });
       location.hash = `#/run/${r.run_id}`;
     } catch (err) { toast(err.message); $('#go').disabled = false; }
   };
@@ -368,7 +372,7 @@ function renderResults() {
     </div></div></div>
   ${topSourcesCard(dr)}
   <div class="card">${loops.length > 1 ? `<div class="row" style="margin-bottom:8px"><span class="small muted">Showing details for</span><div class="seg" id="rl">${loops.map((l) => `<button data-l="${l.loop}" class="${l.loop === currentLoopNo() ? 'on' : ''}">Loop ${l.loop}${l.loop === loops.length ? ' (final)' : ''}</button>`).join('')}</div></div>` : ''}
-  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['news', `News${dr.newsdesk && dr.newsdesk.dossier ? ` (${dr.newsdesk.dossier.events.length})` : ''}`], ['numbers', 'Numbers'], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
+  <div class="tabs" id="tabs">${[['overview', 'Overview & chart'], ['news', `News${dr.newsdesk && dr.newsdesk.dossier ? ` (${dr.newsdesk.dossier.events.length})` : ''}`], ['numbers', 'Numbers'], ['srplus', `SR Plus & PDFs${dr.sr_plus ? ` (${(dr.sr_plus.used ? 1 : 0) + (dr.user_documents || []).filter((d) => d.used).length})` : ''}`], ['analysts', 'Analyst reports'], ['panel', 'Head ↔ Critic'], ['rules', 'Rules'], ['sources', `Sources (${RUN.bundle ? RUN.bundle.evidence.length : 0})`], ['audit', 'Audit trail']].map(([k, t]) => `<button data-t="${k}" class="${RUN.tab === k ? 'on' : ''}">${t}</button>`).join('')}</div><div id="tab-body"></div></div>`;
   $('#tabs').onclick = (e) => { const t = e.target.dataset.t; if (t) { RUN.tab = t; $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t === t)); renderTab(); } };
   const rl = $('#rl'); if (rl) rl.onclick = (e) => { const l = e.target.dataset.l; if (l) { RUN.resultLoop = Number(l); renderResults(); } };
   const ts = $('#topn'); if (ts) ts.onclick = (e) => { const n = e.target.dataset.n; if (n) { store.set('ca-topn', Number(n)); renderResults(); } };
@@ -410,7 +414,7 @@ function topSourcesCard(dr) {
 
 function renderTab() {
   const dr = currentRecord(), b = currentBundle(dr), el = $('#tab-body');
-  const T = { overview: tabOverview, news: tabNews, numbers: tabNumbers, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
+  const T = { overview: tabOverview, news: tabNews, numbers: tabNumbers, srplus: tabSRPlus, analysts: tabAnalysts, panel: tabPanel, rules: tabRules, sources: tabSources, audit: tabAudit }[RUN.tab];
   el.innerHTML = T(dr, b);
   if (RUN.tab === 'overview') drawChart(dr, b);
   if (RUN.tab === 'sources') bindSourceFilter();
@@ -465,8 +469,105 @@ function tabNumbers(dr) {
     <div class="small"><span class="pill ${au.status === 'unmodified' ? 'good' : au.status === 'modified' ? 'bad' : 'warn'}">audit opinion: ${esc(au.status || 'unknown')}</span> ${esc(au.detail || '')}</div>
     <div class="small">Auditors: ${esc((fi.auditors || []).join(', ') || '—')}</div>
     ${fi.rpt ? `<div class="small">Related-party transactions in the latest quarter: ${fi.rpt.rows} line items, ₹${fmt(fi.rpt.amount_cr, 0)} cr gross (all types — judge materiality, not count).</div>` : ''}
-    <div class="small"><span class="pill warn">insider trades: ${esc((fi.insider_trades || {}).status || 'unknown')}</span> ${esc((fi.insider_trades || {}).reason || '')}</div>
+    <div class="small muted">Insider trades: ${esc((fi.insider_trades || {}).status || 'unknown')} — ${esc((fi.insider_trades || {}).reason || '')} Not counted against confidence; promoter behaviour is judged from the filed pledge and holding series.</div>
     </div></div>`;
+}
+
+// Analyst consensus from the user's LSEG Stock Reports Plus PDF, exactly as frozen into this run.
+const pdfLink = (sym, file) => `<a href="/api/docs/${encodeURIComponent(sym)}/file/${encodeURIComponent(file)}" target="_blank" rel="noopener">open PDF ↗</a>`;
+
+function tabSRPlus(dr) {
+  if (!dr.sr_plus) return '<div class="empty">This run predates SR Plus and PDF support.</div>';
+  return srPlusSection(dr) + userDocsSection(dr);
+}
+
+function userDocsSection(dr) {
+  const ds = dr.user_documents || [];
+  const folder = `data/sr_plus/${esc(dr.symbol)}/`;
+  const typeLabel = { broker_report: 'Broker report', annual_report: 'Annual report', concall_transcript: 'Call transcript', investor_presentation: 'Presentation', results: 'Results', sector_report: 'Sector report', news_article: 'Article', other: 'Document' };
+  return `<h3 style="margin-top:20px">Your other PDFs for ${esc(dr.symbol)}</h3>
+    <p class="small muted">Every PDF you save in <code>${folder}</code> is identified and read once (text-layer pages by code, image pages by the model), then cached by file hash. The most relevant pages go to the panel, cited by page number. Authors' views are attributed opinion.</p>
+    ${ds.length ? `<div class="tbl-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Date</th><th>Pages read</th><th>Used</th></tr></thead><tbody>
+      ${ds.map((d) => `<tr><td><b>${esc(d.meta.title || d.file)}</b><div class="small muted">${esc(d.meta.publisher || '')}${d.meta.summary ? ' · ' + esc(d.meta.summary) : ''}</div><div class="small">${esc(d.file)} · ${pdfLink(dr.symbol, d.file)}${d.evidence_id ? ` · <span class="cite verified" data-ev="${esc(d.evidence_id)}" data-pid="" data-q="" data-st="source">${esc(d.evidence_id)}</span>` : ''}</div></td>
+        <td class="small">${esc(typeLabel[d.meta.document_type] || d.meta.document_type)}</td><td class="small">${esc(d.meta.document_date || 'not stated')}</td>
+        <td class="small">${d.pages_read}/${d.pages_total}<div class="muted">${esc({ text_layer: 'text layer', model: 'model-read', mixed: 'text + model' }[d.text_method] || '')}${(d.pages_not_read || []).length ? ` · ${d.pages_not_read.length} over page limit` : ''}</div></td>
+        <td><span class="pill ${d.used ? 'good' : 'bad'}">${d.used ? 'used' : esc(d.status)}</span><div class="small muted">${esc(d.reason)}</div></td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="muted small">None besides SR Plus reports.</div>'}`;
+}
+
+function srPlusSection(dr) {
+  const s = dr.sr_plus;
+  const folder = `data/sr_plus/${esc(dr.symbol)}/`;
+  if (!s.data) {
+    if (s.status === 'missing') {
+      return `<div class="notice info"><b>No SR Plus report in <code>${folder}</code>.</b></div>
+      <p class="small">To add analyst consensus, estimate revisions and broker up/downgrades: open the stock's <b>Stock Reports Plus</b> page on ETPrime, print it to PDF (Ctrl+P → Save as PDF) and save it in <code>${folder}</code>. The next run reads it once (by file hash) and code checks the numbers before the panel sees them.</p>`;
+    }
+    const credit = /credit balance/i.test(s.reason || '');
+    return `<div class="notice bad"><b>Your PDF is in <code>${folder}</code> but could not be read in this run.</b><br><span class="small">${esc(s.reason)}</span></div>
+      <p class="small">${credit ? 'The PDF pages are images, so a model must read them — and the Anthropic API account behind ANTHROPIC_API_KEY is out of credit. Add credit at console.anthropic.com → Plans &amp; Billing, then run again; nothing else needs to change.'
+        : 'Fix the problem above and run again — the file is read automatically on the next run and cached after that.'}</p>`;
+  }
+  const d = s.data, cls = (v) => v == null ? '' : v >= 8 ? 'good' : v >= 4 ? 'warn' : 'bad';
+  const score = (label, v) => `<div class="${cls(v)}"><span class="small muted">${label}</span><b>${v ?? '—'}</b></div>`;
+  const pct = (x, n = 1) => x == null ? '—' : `${x > 0 ? '+' : ''}${fmt(x, n)}%`;
+  const statusPill = { available: 'good', stale: 'warn', expired: 'bad', mismatch: 'bad', unreliable: 'bad' }[s.status] || '';
+  const ok = (s.checks || []).filter((c) => c.ok).length;
+  const close = dr.price_at_decision;
+  const upNow = d.target_mean && close ? (d.target_mean / close - 1) * 100 : null;
+  const dist = [['Strong buy', d.ibes_strong_buy], ['Buy', d.ibes_buy], ['Hold', d.ibes_hold], ['Sell', d.ibes_sell], ['Strong sell', d.ibes_strong_sell]];
+  const maxN = Math.max(1, ...dist.map(([, n]) => n || 0));
+  const table = (head, rows) => rows.length ? `<div class="tbl-wrap"><table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>` : '<div class="muted small">Not in the report.</div>';
+  const est = (rows) => table(['Period', 'Mean', 'High', 'Low', 'Analysts'], (rows || []).map((r) => `<tr><td>${esc(r.period)}</td><td><b>${fmt(r.mean)}</b></td><td>${fmt(r.high)}</td><td>${fmt(r.low)}</td><td>${r.analysts ?? '—'}${r.growth_pct != null ? ` <span class="muted small">(growth ${pct(r.growth_pct)})</span>` : ''}</td></tr>`));
+  const groups = {};
+  (d.metrics || []).forEach((m) => { const [g, ...n] = m.name.split(':'); (groups[n.length ? g.trim() : 'Other'] ||= []).push({ ...m, label: n.length ? n.join(':').trim() : m.name }); });
+  return `<div class="notice ${s.used ? 'info' : 'bad'}"><b>LSEG Stock Reports Plus</b> for ${esc(d.company_line || d.ticker || dr.symbol)}, report dated <b>${esc(d.report_date || '—')}</b>
+      <span class="pill ${statusPill}">${esc(s.status)}${s.age_days != null ? ` · ${s.age_days} day(s) old` : ''}</span>
+      ${s.used ? '' : ' — <b>not given to the panel</b>'}<br>
+      <span class="small">${esc(s.reason)} · ${ok}/${(s.checks || []).length} report figures recompute in code · ${esc(s.company_check || '')} ·
+      ${pdfLink(dr.symbol, s.file)} ·
+      read by ${esc(s.model || 'model')} on ${dt(s.extracted_at)}${s.evidence_id ? ` · evidence <span class="cite verified" data-ev="${esc(s.evidence_id)}" data-pid="" data-q="" data-st="source">${esc(s.evidence_id)}</span>` : ''}</span><br>
+      <span class="small muted">Third-party data and analyst opinion, weighted strongly by the panel as the market's expectation — never used as our valuation. LSEG copyright; your local copy, personal use only.</span></div>
+    ${(s.warnings || []).length ? `<div class="notice bad" style="margin-top:10px">${s.warnings.map(esc).join('<br>')}</div>` : ''}
+    <h3 style="margin-top:14px">LSEG scores (1–10)</h3>
+    <div class="sr-scores">${score('Average', d.score_average)}${score('Earnings', d.score_earnings)}${score('Fundamental', d.score_fundamental)}${score('Relative valuation', d.score_relative_valuation)}${score('Risk', d.score_risk)}${score('Price momentum', d.score_price_momentum)}</div>
+    <div class="grid g2" style="margin-top:14px"><div>
+      <h3>Analyst consensus (I/B/E/S)</h3>
+      <div class="kv"><div><span>Mean recommendation</span><b>${esc(titleCase(d.ibes_mean || '—'))}</b></div><div><span>Analysts</span><b>${d.ibes_analysts ?? '—'}</b></div></div>
+      <div class="sr-dist" style="margin-top:8px">${dist.map(([l, n]) => `<span>${l}</span><span><i style="width:${((n || 0) / maxN) * 100}%"></i></span><span>${n ?? '—'}</span>`).join('')}</div>
+      <h4 style="margin-top:14px">12-month price target</h4>
+      <div class="kv"><div><span>Mean</span><b>${fmt(d.target_mean)}</b></div><div><span>High / low</span><b>${fmt(d.target_high, 0)} / ${fmt(d.target_low, 0)}</b></div>
+        <div><span>vs report close ${fmt(d.last_close)}</span><b>${pct(d.target_vs_current_pct)}</b></div><div><span>vs run close ${fmt(close)}</span><b>${pct(upNow)}</b></div></div>
+      <p class="small muted">The analysts' opinion from ${d.target_analysts ?? '—'} analysts. "vs run close" is computed here against this run's price.</p>
+    </div><div>
+      <h3>Expectations and how they are moving</h3>
+      <div class="kv"><div><span>Estimate revisions (4 weeks)</span><b>${d.revisions_up_4w ?? '—'} up · ${d.revisions_down_4w ?? '—'} down</b></div>
+        <div><span>Average revision</span><b>${pct(d.revisions_avg_up_pct)} / ${pct(d.revisions_avg_down_pct)}</b></div>
+        <div><span>Broker changes (120 days)</span><b>${d.broker_upgrades_120d ?? '—'} up · ${d.broker_downgrades_120d ?? '—'} down</b></div>
+        <div><span>Surprises (last 4 quarters)</span><b>${d.surprises_positive_last4 ?? '—'} beat · ${d.surprises_negative_last4 ?? '—'} miss · ${d.surprises_inline_last4 ?? '—'} in line</b></div>
+        <div><span>Next results expected</span><b>${esc(d.next_report_date || '—')}</b></div><div><span>Forward P/E</span><b>${fmt(d.forward_pe, 1)}</b></div></div>
+      <h4 style="margin-top:14px">Results versus consensus</h4>
+      ${table(['Period ended', 'Actual EPS', 'Consensus', 'Surprise'], (d.surprise_detail || []).map((x) => `<tr><td>${esc(x.period_end)}<div class="muted small">announced ${esc(x.announce_date || '—')}</div></td><td>${fmt(x.actual_eps)}</td><td>${fmt(x.mean_eps)}</td><td><span class="pill ${x.surprise_pct > 2 ? 'good' : x.surprise_pct < -2 ? 'bad' : ''}">${pct(x.surprise_pct)}</span></td></tr>`))}
+    </div></div>
+    <div class="grid g2" style="margin-top:14px"><div>
+      <h3>Consensus estimate trend</h3>
+      ${table(['Period', 'Now', '30 days ago', '90 days ago', 'Change (90d)'], (d.estimate_trend || []).map((t) => `<tr><td>${esc(t.period)}</td><td><b>${fmt(t.current)}</b></td><td>${fmt(t.days_30_ago)}</td><td>${fmt(t.days_90_ago)}</td><td><span class="pill ${t.change_90d_pct > 0 ? 'good' : t.change_90d_pct < 0 ? 'bad' : ''}">${pct(t.change_90d_pct)}</span></td></tr>`))}
+      <h4 style="margin-top:14px">EPS estimates — quarterly</h4>${est(d.eps_quarterly)}
+      <h4 style="margin-top:14px">EPS estimates — annual</h4>${est(d.eps_annual)}
+      <h4 style="margin-top:14px">Revenue estimates — annual</h4>${est(d.revenue_annual)}
+    </div><div>
+      ${Object.entries(groups).map(([g, ms]) => `<h3>${esc(g)}</h3>${table(['Indicator', 'Value'], ms.map((m) => `<tr><td class="small">${esc(m.label)}${m.period ? `<div class="muted">${esc(m.period)}</div>` : ''}</td><td><b>${fmt(m.value)}</b> <span class="muted small">${esc(m.unit || '')}</span></td></tr>`))}`).join('<div style="height:10px"></div>')}
+    </div></div>
+    ${(s.history || []).length > 1 ? `<h3 style="margin-top:14px">How consensus moved across your saved reports</h3>
+      ${table(['Report date', 'Average', 'Earnings', 'Consensus', 'Mean target', 'Report close', 'Revisions (4w)', 'Broker changes (120d)'], s.history.map((h) => `<tr${h.report_date === d.report_date ? ' style="font-weight:600"' : ''}><td>${esc(h.report_date)}<div class="muted small">${esc(h.file)} · ${esc(h.status)}</div></td><td>${h.score_average ?? '—'}</td><td>${h.score_earnings ?? '—'}</td><td>${esc(titleCase(h.ibes_mean || '—'))} <span class="muted small">(${h.ibes_analysts ?? '—'})</span></td><td>${fmt(h.target_mean)}</td><td>${fmt(h.last_close)}</td><td>${h.revisions_up_4w ?? '—'} up · ${h.revisions_down_4w ?? '—'} down</td><td>${h.broker_upgrades_120d ?? '—'} up · ${h.broker_downgrades_120d ?? '—'} down</td></tr>`))}` : ''}
+    <h3 style="margin-top:14px">Peers</h3>
+    ${table(['Ticker', 'Score', 'Price', '1M', '3M', '1Y', 'Trailing P/E', 'Forward P/E', 'Net margin', 'Consensus', 'Analysts'], (d.peers || []).map((p) => `<tr${(p.ticker || '').toUpperCase() === (d.ticker || '').split('-')[0].toUpperCase() ? ' style="font-weight:600"' : ''}><td>${esc(p.ticker)}</td><td>${p.average_score ?? '—'}</td><td>${fmt(p.price)}</td><td>${pct(p.ret_1m_pct)}</td><td>${pct(p.ret_3m_pct)}</td><td>${pct(p.ret_1y_pct)}</td><td>${fmt(p.trailing_pe, 1)}</td><td>${fmt(p.forward_pe, 1)}</td><td>${p.net_margin_pct == null ? '—' : fmt(p.net_margin_pct, 1) + '%'}</td><td>${esc(p.ibes_mean || '—')}</td><td>${p.analysts ?? '—'}</td></tr>`))}
+    ${(d.highlights || []).length ? `<h3 style="margin-top:14px">LSEG highlights</h3><ul class="small">${d.highlights.map((h) => `<li><b>${esc(h.section)}:</b> ${esc(h.text)}${h.page ? ` <span class="muted">(p. ${h.page})</span>` : ''}</li>`).join('')}</ul>` : ''}
+    <details style="margin-top:14px"><summary><b>Code checks on the transcription</b> (${ok}/${(s.checks || []).length} pass)</summary>
+      ${table(['Check', 'Result', 'Detail'], (s.checks || []).map((c) => `<tr><td class="small">${esc(titleCase(c.check))}</td><td><span class="res ${c.ok ? 'pass' : 'fail'}">${c.ok ? 'pass' : 'fail'}</span></td><td class="small">${esc(c.detail)}</td></tr>`))}
+      ${(d.unreadable || []).length ? `<p class="small"><b>Not legible in the PDF (left empty):</b> ${d.unreadable.map(esc).join('; ')}</p>` : ''}
+      ${(s.others || []).length ? `<p class="small muted">Other PDFs in ${folder}: ${s.others.map((o) => `${esc(o.file)} (${esc(o.report_date || '?')}, ${esc(o.status)})`).join(', ')}</p>` : ''}
+    </details>`;
 }
 
 function tabNews(dr) {
@@ -945,7 +1046,7 @@ async function viewET() {
     <p class="small muted">Score = 3 × articles positive (buy/accumulate) − 3 × articles negative + 1 × neutral mentions + 0.5 × named recommenders + target upside (capped). These are <b>attributed opinions from your articles</b>, not our valuation — the panel analysis decides.</p>
     <div id="ideas-body"><div class="muted small">Click <b>Extract &amp; rank ideas</b> after the idea articles are captured.</div></div>
   </div>
-  <div class="card"><h3>Recent batches</h3>${batches.length ? `<div class="tbl-wrap"><table><tbody>${batches.map((b) => `<tr><td><a href="#/batch/${esc(b.batch_id)}">${dt(b.created_at)}</a></td><td>${statusPill(b.status)}</td><td>${b.symbols.map((s) => `<span class="pill">${esc(s)}</span>`).join(' ')}</td><td class="small muted">${esc(b.params.horizon)} · ${b.params.loops} loop(s) · ${esc(b.params.mode)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No batches yet.</div>'}</div>`;
+  <div class="card"><h3>Recent batches</h3>${batches.length ? `<div class="tbl-wrap"><table><tbody>${batches.map((b) => `<tr><td><a href="#/batch/${esc(b.batch_id)}">${dt(b.created_at)}</a></td><td>${statusPill(b.status)}</td><td>${b.symbols.map((s) => `<span class="pill">${esc(s)}</span>`).join(' ')}</td><td class="small muted">${esc(b.params.horizon)} · ${b.params.loops} loop(s) · ${esc(b.params.mode)}${b.params.batch_api ? ' · half price' : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty small">No batches yet.</div>'}</div>`;
   const save = async (recapture) => {
     const lines = (id) => $(id).value.split(/\s+/).filter(Boolean);
     try {
@@ -1006,13 +1107,14 @@ function ideasHtml(r) {
       <div class="row"><div><label class="small">Horizon</label><div class="seg" id="b-hz"><button data-v="short">Short</button><button data-v="medium" class="on">Medium</button><button data-v="long">Long</button></div></div>
         <div><label class="small">Loops</label><div class="seg" id="b-lp">${Array.from({ length: (HEALTH && HEALTH.analysis.max_loops) || 3 }, (_, i) => `<button data-v="${i + 1}" class="${i === 0 ? 'on' : ''}">${i + 1}</button>`).join('')}</div></div>
         <div><label class="small">Mode</label><div class="seg" id="b-md"><button data-v="live" class="${HEALTH && !HEALTH.panel_missing_keys.length ? 'on' : ''}">Live</button><button data-v="demo" class="${HEALTH && HEALTH.panel_missing_keys.length ? 'on' : ''}">Demo</button></div></div>
+        <div><label class="small">Price</label><div class="seg" id="b-px"><button data-v="half" class="on" title="Anthropic Batch API: every model call at half price; results within a few hours">Half price · hours</button><button data-v="std" title="Standard calls: results in minutes">Standard · minutes</button></div></div>
         <span class="spacer"></span><button class="btn primary" id="b-go">Analyse selected (<span id="b-n">${ET.picked.size}</span>)</button></div>
-      <p class="small muted" id="b-est">Each stock gets the full panel (three brains, Head, Critic, rules). Live cost scales with stocks × loops; the budget is checked before starting. Demo mode uses the fictional company for every pick (UI preview only).</p></div>`;
+      <p class="small muted" id="b-est">Each stock gets the full panel (three brains, Head, Critic, rules). Live cost scales with stocks × loops; the budget is checked before starting. Half price queues every model call in Anthropic's Batch API (same models and prompts, answers usually within an hour per step, so a batch can take a few hours). Demo mode uses the fictional company for every pick (UI preview only).</p></div>`;
 }
 
 function bindIdeas() {
   const segv = (id) => { const b = $(`${id} button.on`); return b ? b.dataset.v : null; };
-  ['#b-hz', '#b-lp', '#b-md'].forEach((id) => { const el = $(id); if (el) el.onclick = (e) => { if (e.target.dataset.v) { $$(`${id} button`).forEach((b) => b.classList.toggle('on', b === e.target)); } }; });
+  ['#b-hz', '#b-lp', '#b-md', '#b-px'].forEach((id) => { const el = $(id); if (el) el.onclick = (e) => { if (e.target.dataset.v) { $$(`${id} button`).forEach((b) => b.classList.toggle('on', b === e.target)); } }; });
   $$('[data-pick]').forEach((c) => (c.onchange = () => { c.checked ? ET.picked.add(c.dataset.pick) : ET.picked.delete(c.dataset.pick); $('#b-n').textContent = ET.picked.size; }));
   const go = $('#b-go'); if (!go) return;
   go.onclick = async () => {
@@ -1021,7 +1123,7 @@ function bindIdeas() {
     go.disabled = true;
     try {
       const ideas = ET.ranking.top.filter((s) => ET.picked.has(s.symbol));
-      const r = await api('/api/batches', { method: 'POST', body: { symbols: [...ET.picked], horizon: segv('#b-hz') || 'medium', loops: Number(segv('#b-lp') || 1), mode: segv('#b-md') || 'live', ideas } });
+      const r = await api('/api/batches', { method: 'POST', body: { symbols: [...ET.picked], horizon: segv('#b-hz') || 'medium', loops: Number(segv('#b-lp') || 1), mode: segv('#b-md') || 'live', batch_api: (segv('#b-px') || 'half') === 'half', ideas } });
       location.hash = `#/batch/${r.batch_id}`;
     } catch (e) { toast(e.message); go.disabled = false; }
   };
