@@ -147,7 +147,7 @@ def test_stale_price_blocks():
 
 
 def test_setup_only_blocks_keep_the_buy_verdict_on_hold(monkeypatch):
-    """policies_confirmed:false, unverified tax file and no capital are about YOUR setup, not the stock:
+    """policies_confirmed:false and an unverified tax file are about YOUR setup, not the stock:
     the verdict stays BUY (not actionable, on hold) instead of turning into 'insufficient data'."""
     def cfg(name):
         c = copy.deepcopy(real_config(name))
@@ -269,3 +269,99 @@ def test_confidence_ignores_insider_trades_and_counts_sr_plus():
     assert R.confidence(stale.model_copy(update={"facts": stale.facts + facts}), {})["gaps"] == ["SR Plus report is stale — save a fresh one"]
     none = _bundle(horizon="short", coverage={"news": "available"})
     assert R.confidence(none, {})["gaps"] == ["No usable SR Plus report (analyst consensus, estimate revisions)"]
+
+
+@pytest.fixture
+def no_capital(monkeypatch):
+    """Policies confirmed and tax verified, but no rupee capital configured."""
+    def cfg(name):
+        c = copy.deepcopy(real_config(name))
+        if name == "user":
+            c["capital"]["total_investment_capital_inr"] = None
+            c["policies_confirmed"] = True
+        if name == "tax_rates":
+            c["review_status"] = "verified"
+        return c
+    monkeypatch.setattr(R, "config", cfg)
+    return cfg
+
+
+@pytest.mark.parametrize("stop,expected_pct,binding", [
+    (94.0, 15.0, "per-stock cap"),     # 6% stop: risk allows 33% of capital, per-stock cap (30% of 50%) binds
+    (80.0, 10.0, "risk"),              # 20% stop: 2% / 20% = 10% of capital
+    (97.9, 15.0, "per-stock cap"),     # tight stop: 3% minimum distance -> 66.7%, cap binds
+])
+def test_sizing_in_percent_without_capital(no_capital, stop, expected_pct, binding):
+    b = _bundle()
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": stop, "target_low": 125.0, "target_high": 140.0}
+    s = R.size_position(b, plan)
+    assert s["status"] == "ok" and s["basis"] == "percent" and "qty" not in s
+    assert s["position_pct_of_capital"] == pytest.approx(expected_pct, abs=0.01) and s["binding_constraint"] == binding
+    assert s["loss_at_stop_pct_of_capital"] <= 2.0 + 1e-9
+    assert [t["pct"] for t in s["tranches"]] == [50, 30, 20]
+    assert sum(t["pct_of_capital"] for t in s["tranches"]) == pytest.approx(expected_pct, abs=0.02)
+    assert all(t["above_stop"] for t in s["tranches"])
+
+
+def test_stop_too_wide_is_below_floor_without_capital(no_capital):
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 40.0, "target_low": 125.0, "target_high": 140.0}
+    s = R.size_position(_bundle(), plan)      # 2% / 60% = 3.3% of capital < 4% floor (8% of the 50% stock portion)
+    assert s["status"] == "below_floor" and "stop is too wide" in s["detail"]
+
+
+def test_clean_buy_is_actionable_without_capital(no_capital):
+    b = _bundle()
+    out = R.enforce(b, R.preflight(b), HEAD_BUY, PANEL_OK | {"forensic_checks": _clean_checks()})
+    fa = out["final_action"]
+    assert fa["decision"] == "buy" and fa["actionable"] and not fa["on_hold"], out["rule_results"]
+    assert fa["sizing"]["status"] == "ok" and fa["sizing"]["basis"] == "percent"
+    assert R.consistency(out, HEAD_BUY)["result"] == "passed"
+
+
+def test_capital_adds_quantities_to_the_same_percent_plan(capital):
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 94.0, "target_low": 125.0, "target_high": 140.0}
+    s = R.size_position(_bundle(), plan)
+    assert s["basis"] == "capital" and s["position_pct_of_capital"] == pytest.approx(15.0)
+    assert s["qty"] == 1500 and s["value_inr"] == pytest.approx(150_000)        # 15% of Rs 10 lakh at Rs 100
+
+
+def test_reward_risk_shown_for_low_mid_and_high_target():
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 94.0, "target_low": 110.0, "target_high": 130.0}
+    t = R.reward_risk_by_target(plan)                    # entry mid 99, risk 5
+    assert t["low"] == 2.2 and t["mid"] == 4.2 and t["high"] == 6.2 and t["mid_target"] == 120.0
+    assert R.reward_risk_by_target(dict(plan, target_high=None)) == {"low": 2.2}
+
+
+def test_head_price_trigger_below_minimum_is_lowered_short_term():
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 90.0, "target_low": 110.0, "target_high": 120.0}
+    head_t = {"kind": "price", "price_level": 97.0, "direction": "below", "description": "pull-back to 97"}
+    t, note = R.check_price_trigger(head_t, plan, 2.0, enforce_min=True)   # at 97: (110-97)/(97-90) = 1.86
+    assert note and "lowered" in note
+    assert t["price_level"] == R.rr_level(110.0, 90.0, 2.0) == 96.66 and t["set_by"] == "code" and t["head_level"] == 97.0
+    assert t["reward_risk_at_level"] >= 2.0 and t["meets_minimum"]
+
+
+def test_trigger_reward_risk_reported_not_enforced_outside_short_term():
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 90.0, "target_low": 110.0, "target_high": 120.0}
+    head_t = {"kind": "price", "price_level": 97.0, "direction": "below", "description": "pull-back to 97"}
+    t, note = R.check_price_trigger(head_t, plan, 2.0, enforce_min=False)
+    assert note is None and t["price_level"] == 97.0 and t["reward_risk_at_level"] == 1.86 and not t["meets_minimum"]
+
+
+def test_breakout_trigger_below_minimum_is_flagged_not_moved():
+    plan = {"entry_low": 98.0, "entry_high": 100.0, "stop": 90.0, "target_low": 110.0, "target_high": 120.0}
+    head_t = {"kind": "price", "price_level": 102.0, "direction": "above", "description": "breakout over 102"}
+    t, note = R.check_price_trigger(head_t, plan, 2.0, enforce_min=True)   # (110-102)/(102-90) = 0.67
+    assert t["price_level"] == 102.0 and not t["meets_minimum"] and "would fail the reward/risk rule" in note
+
+
+def test_enforce_checks_the_heads_own_wait_trigger(capital):
+    b = _bundle()                                         # short horizon, last close 100
+    head = {"decision": "wait", "entry_low": 95.0, "entry_high": 96.0, "stop": 90.0, "target_low": 104.0, "target_high": 112.0,
+            "trigger": {"kind": "price", "price_level": 96.0, "direction": "below", "description": "dip to 96"}}
+    out = R.enforce(b, R.preflight(b), head, PANEL_OK | {"forensic_checks": _clean_checks()})
+    t = out["final_action"]["trigger"]
+    assert out["final_action"]["decision"] == "wait"
+    assert t["price_level"] < 96.0 and t["meets_minimum"] and t["head_level"] == 96.0      # (104-96)/(96-90)=1.33 -> lowered
+    assert any("lowered" in a for a in out["adjustments"])
+    assert out["calculations"]["reward_risk_by_target"]["mid"] is not None

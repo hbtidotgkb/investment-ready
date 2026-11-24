@@ -363,9 +363,10 @@ function renderResults() {
       ${blocking.length ? `<h4 style="margin-top:14px">What stands between this and an actionable decision</h4><div class="checklist">${blocking.map((r) => `<div><span class="res ${r.result}">${r.result === 'blocked' ? '✖' : '?'}</span><span><b>${esc(titleCase(r.rule))}</b> — ${esc(r.detail)}<br><span class="muted small">${esc(FIX_HINTS[r.rule] || '')}</span></span></div>`).join('')}</div>` : ''}
       ${plan ? `<h4 style="margin-top:14px">${fa.actionable ? 'Plan' : fa.on_hold ? 'Plan (on hold until setup is complete)' : 'Conditional levels (not actionable)'}</h4><div class="kv">
         <div><span>Entry zone</span><b>${fmt(plan.entry_low, 0)}–${fmt(plan.entry_high, 0)}</b></div><div><span>Stop</span><b>${fmt(plan.stop, 0)}</b></div>
-        <div><span>Target</span><b>${fmt(plan.target_low, 0)}${plan.target_high ? '–' + fmt(plan.target_high, 0) : ''}</b></div><div><span>Reward / risk</span><b>${rr ?? '—'}</b></div>
-        ${sz ? `<div><span>Quantity</span><b>${sz.qty} sh</b></div><div><span>Planned loss at stop</span><b>₹${fmt(sz.planned_loss_at_stop_inr, 0)}</b></div>` : ''}</div>
-        ${sz ? `<p class="small muted">Tranches: ${sz.tranches.map((t) => `${t.tranche} ${t.qty} @ ${fmt(t.price, 0)}`).join(' · ')}. ${esc(sz.note)}</p>` : ''}` : ''}
+        <div><span>Target</span><b>${fmt(plan.target_low, 0)}${plan.target_high ? '–' + fmt(plan.target_high, 0) : ''}</b></div><div><span>Reward / risk</span><b>${rrText(dr.calculations)}</b></div>
+        ${sz ? `<div><span>Position size</span><b>up to ${fmt(sz.position_pct_of_capital, 1)}% of capital</b></div><div><span>Loss at stop</span><b>${fmt(sz.loss_at_stop_pct_of_capital, 2)}% of capital</b></div>` : ''}
+        ${sz && sz.qty !== undefined ? `<div><span>Quantity</span><b>${sz.qty} sh (₹${fmt(sz.value_inr, 0)})</b></div><div><span>Planned loss at stop</span><b>₹${fmt(sz.planned_loss_at_stop_inr, 0)}</b></div>` : ''}</div>
+        ${sz ? `<p class="small muted">Tranches: ${sz.tranches.map((t) => `${t.tranche} ${t.pct}% of the position (${fmt(t.pct_of_capital, 1)}% of capital${t.qty !== undefined ? `, ${t.qty} sh` : ''}) @ ${fmt(t.price, 0)}`).join(' · ')}. Limited by the ${sz.binding_constraint === 'risk' ? `${fmt(sz.max_loss_at_stop_pct_of_capital, 1)}% loss-at-stop limit` : 'per-stock limit'}. ${esc(sz.note)}${sz.qty === undefined ? ' Set your capital in config/user.yaml to also see share quantities.' : ''}</p>` : ''}` : ''}
       ${hp.entry_conditions && hp.entry_conditions.length ? `<p class="small"><b>Entry conditions:</b> ${hp.entry_conditions.map(esc).join('; ')}</p>` : ''}
       ${hp.invalidation_conditions && hp.invalidation_conditions.length ? `<p class="small"><b>Invalidated if:</b> ${hp.invalidation_conditions.map(esc).join('; ')}</p>` : ''}
       ${hp.material_dissent && hp.material_dissent.length ? `<p class="small"><b>Material dissent kept:</b> ${hp.material_dissent.map(esc).join('; ')}</p>` : ''}
@@ -663,7 +664,7 @@ function whatNext(fa, dr) {
     if (t.kind === 'price' && t.price_level && px) gap = `Now ₹${fmt(px)} · needs a ${fmt(Math.abs(t.price_level / px - 1) * 100, 1)}% ${t.direction === 'below' ? 'fall' : 'rise'}`;
     if (t.kind === 'date' && t.date) gap = `${Math.max(0, Math.round((new Date(t.date) - new Date(dr.decision_at)) / 864e5))} days from the decision date`;
     return `<div class="notice info" style="margin-top:10px"><b>⏳ Wait until:</b> ${esc(t.description)}${t.kind === 'price' && t.price_level ? ` <b>(${esc(t.direction)} ₹${fmt(t.price_level)})</b>` : ''}${t.kind === 'date' && t.date ? ` <b>(${esc(t.date)})</b>` : ''}
-      ${gap ? `<div class="small">${gap}</div>` : ''}${t.set_by === 'code' ? '<div class="small muted">Trigger set by the rules (the Head proposed buy).</div>' : ''}<div class="small muted">When it happens, run the analysis again.</div></div>${conf}`;
+      ${gap ? `<div class="small">${gap}</div>` : ''}${t.reward_risk_at_level != null ? `<div class="small">Reward/risk if bought at this level: <b>${t.reward_risk_at_level}</b> to the low target (minimum ${t.reward_risk_min})${t.meets_minimum ? '' : ' — <b>below the minimum</b>'}</div>` : ''}${t.set_by === 'code' ? `<div class="small muted">${t.head_level ? `Trigger set by the rules: the Head proposed ₹${fmt(t.head_level)}, where reward/risk was below the minimum.` : 'Trigger set by the rules (the Head proposed buy).'}</div>` : ''}<div class="small muted">When it happens, run the analysis again.</div></div>${conf}`;
   }
   if (fa.decision === 'avoid') {
     return `<div class="notice bad" style="margin-top:10px"><b>Why avoid:</b> ${esc(fa.avoid_reason || '—')}
@@ -1112,6 +1113,13 @@ function ideasHtml(r) {
       <p class="small muted" id="b-est">Each stock gets the full panel (three brains, Head, Critic, rules). Live cost scales with stocks × loops; the budget is checked before starting. Half price queues every model call in Anthropic's Batch API (same models and prompts, answers usually within an hour per step, so a batch can take a few hours). Demo mode uses the fictional company for every pick (UI preview only).</p></div>`;
 }
 
+function rrText(c) {
+  const t = c && c.reward_risk_by_target;
+  if (!t || t.low == null) return (c && c.reward_risk != null) ? String(c.reward_risk) : '—';
+  if (t.mid == null) return `${t.low} <span class="small muted">(to target)</span>`;
+  return `${t.low} <span class="small muted">(low target, used by the rule)</span> · ${t.mid} <span class="small muted">(mid ₹${fmt(t.mid_target, 0)})</span> · ${t.high} <span class="small muted">(high)</span>`;
+}
+
 function bindIdeas() {
   const segv = (id) => { const b = $(`${id} button.on`); return b ? b.dataset.v : null; };
   ['#b-hz', '#b-lp', '#b-md', '#b-px'].forEach((id) => { const el = $(id); if (el) el.onclick = (e) => { if (e.target.dataset.v) { $$(`${id} button`).forEach((b) => b.classList.toggle('on', b === e.target)); } }; });
@@ -1192,7 +1200,7 @@ async function viewSystem() {
     ${item(h.kite_mcp.connected || h.kite.state === 'connected' ? true : null, 'Zerodha Kite (read-only)', h.kite_mcp.connected ? 'Kite MCP connected (holdings, quotes, candles)' : h.kite.state === 'connected' ? 'Kite Connect connected' : 'Not connected — prices fall back to NSE bhavcopy', '<a href="#/portfolio">Connect Kite (MCP) on the Portfolio page</a> — free, OAuth login on Zerodha\'s page.')}
     ${item(h.bhavcopy.trading_days >= 200 ? true : null, 'NSE bhavcopy store', `${h.bhavcopy.trading_days} trading days · last ${h.bhavcopy.last || '—'}`, 'Run <code>ca ingest-bhav --days 260</code> (fallback when Kite is not connected).')}
     ${item(h.policies_confirmed, 'Personal policies confirmed', 'Horizons, risk base and limits reviewed in config/user.yaml', 'Review the config files and set <code>policies_confirmed: true</code>. Until then everything is research-only.')}
-    ${item(h.capital_configured ? true : null, 'Capital configured', 'Needed for position sizing and tranches', 'Set <code>total_investment_capital_inr</code> in config/user.yaml.')}
+    ${item(h.capital_configured ? true : null, 'Capital (optional)', h.capital_configured ? 'Configured — plans also show share quantities and rupee amounts' : 'Not set — plans are sized as % of your capital', 'Optional: set <code>total_investment_capital_inr</code> in config/user.yaml to also see share quantities.')}
     ${item(h.tax_policy.review_status === 'verified', 'Tax policy verified', `${esc(h.tax_policy.version)} · ${esc(h.tax_policy.review_status)}`, 'Check config/tax_rates.yaml against the latest Finance Act and set <code>review_status: verified</code>. Until then after-tax figures are refused.')}
     <p class="small muted" style="margin-top:10px">Budget: $${h.budget.spent_usd.toFixed(2)} spent of $${h.budget.cap_usd} this month (hard cap in code)${h.budget.calls_with_unknown_price ? ` · ${h.budget.calls_with_unknown_price} call(s) had no price configured` : ''}.</p>
     <button class="btn sm" id="reload">Reload config files</button></div>

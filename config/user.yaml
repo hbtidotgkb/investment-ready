@@ -5,7 +5,7 @@ version: user@1
 policies_confirmed: false
 
 capital:
-  total_investment_capital_inr: null     # e.g. 1000000 — required for position sizing
+  total_investment_capital_inr: null     # optional, e.g. 1000000 — plans are sized as % of capital; set this to also see share quantities
   available_cash_inr: null
   core_pct: 50                           # strategic core (index ETF) vs satellite (stocks)
   portfolio_planned_loss_budget_pct: null  # spec: must be set before production allocation; no default invented

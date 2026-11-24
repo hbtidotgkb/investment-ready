@@ -119,6 +119,9 @@ def what_next_lines(fa: dict) -> list[str]:
         extra = (f" ({t['direction']} Rs {t['price_level']:,.2f})" if t.get("kind") == "price" and t.get("price_level")
                  else f" ({t['date']})" if t.get("date") else "")
         out.append(f"Wait until: {t['description']}{extra}")
+        if t.get("reward_risk_at_level") is not None:
+            out.append(f"Reward/risk if bought there: {t['reward_risk_at_level']} (minimum {t['reward_risk_min']})"
+                       + ("" if t.get("meets_minimum") else " — below the minimum"))
     elif fa["decision"] == "avoid" and fa.get("avoid_reason"):
         out.append(f"Avoid because: {fa['avoid_reason']}")
         if fa.get("would_change_view"):
@@ -145,10 +148,17 @@ def whatsapp(dr: dict) -> str:
     if plan and plan.get("entry_low"):
         lines.append(f"Plan: entry {plan['entry_low']:,.0f}–{plan['entry_high']:,.0f} · stop {plan['stop']:,.0f} · "
                      f"target {plan['target_low']:,.0f}" + (f"–{plan['target_high']:,.0f}" if plan.get("target_high") else ""))
+        rt = (dr.get("calculations") or {}).get("reward_risk_by_target") or {}
+        if rt.get("low") is not None:
+            lines.append(f"Reward/risk: {rt['low']} to the low target" + (
+                f" · {rt['mid']} mid · {rt['high']} high" if rt.get("mid") is not None else ""))
     sz = fa.get("sizing") or {}
     if sz.get("status") == "ok":
-        lines.append(f"Size: {sz['qty']} sh (~Rs {sz['value_inr']:,.0f}); tranches " +
-                     ", ".join(f"{t['tranche']} {t['qty']}@{t['price']:,.0f}" for t in sz["tranches"]))
+        size = f"up to {sz['position_pct_of_capital']:g}% of capital" + (
+            f" = {sz['qty']} sh (~Rs {sz['value_inr']:,.0f})" if "qty" in sz else "")
+        lines.append(f"Size: {size}; tranches " + ", ".join(
+            f"{t['tranche']} {t['pct']}%" + (f" ({t['qty']} sh)" if "qty" in t else "") + f" @{t['price']:,.0f}"
+            for t in sz["tranches"]))
     blocks = [r for r in dr["rule_results"] if r["result"] in ("blocked", "unknown")]
     if blocks:
         lines.append("Needs: " + "; ".join(f"{r['rule'].replace('_', ' ')}" for r in blocks[:5]))

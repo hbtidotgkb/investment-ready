@@ -244,7 +244,7 @@ def code_trigger(plan: dict, blocking: list[dict], rr_min: float) -> dict:
     """When the RULES turn a buy into a wait, code states the trigger itself."""
     t_low, stop = plan.get("target_low"), plan.get("stop")
     if any(r["rule"] == "reward_risk" for r in blocking) and t_low and stop:
-        lv = math.floor((t_low + rr_min * stop) / (1 + rr_min) * 100) / 100   # round DOWN so reward/risk is met at the level
+        lv = rr_level(t_low, stop, rr_min)   # rounded DOWN so reward/risk is met at the level
         return {"kind": "price", "price_level": lv, "direction": "below", "date": None, "set_by": "code",
                 "description": f"Price at or below Rs {lv:,.2f}, where reward/risk to the target reaches {rr_min}"}
     first = next((r for r in blocking if not is_setup_gate(r)), blocking[0] if blocking else None)
@@ -342,6 +342,47 @@ def reward_risk(entry_low, entry_high, stop, target_low) -> Optional[float]:
     return round((target_low - mid) / risk, 2)
 
 
+def reward_risk_by_target(plan: dict) -> dict:
+    """Reward/risk against the low, middle and high target, so the effect of the target choice is visible."""
+    tl, th = plan.get("target_low"), plan.get("target_high")
+    out = {"low": reward_risk(plan.get("entry_low"), plan.get("entry_high"), plan.get("stop"), tl)}
+    if tl is not None and th is not None and th > tl:
+        out["mid"] = reward_risk(plan.get("entry_low"), plan.get("entry_high"), plan.get("stop"), round((tl + th) / 2, 2))
+        out["mid_target"] = round((tl + th) / 2, 2)
+        out["high"] = reward_risk(plan.get("entry_low"), plan.get("entry_high"), plan.get("stop"), th)
+    return out
+
+
+def rr_level(target: float, stop: float, rr_min: float) -> float:
+    """Highest entry price at which reward/risk to `target` reaches `rr_min` (rounded down)."""
+    return math.floor((target + rr_min * stop) / (1 + rr_min) * 100) / 100
+
+
+def check_price_trigger(trigger: dict, plan: dict, rr_min: float, enforce_min: bool) -> tuple[dict, Optional[str]]:
+    """Reward/risk if you buy AT the trigger level, to the low target. When the minimum applies (short-term)
+    and a 'below' trigger misses it, code lowers the trigger to the level where it is met.
+    Returns (trigger, adjustment note or None)."""
+    lv, st, tl = trigger.get("price_level"), plan.get("stop"), plan.get("target_low")
+    if trigger.get("kind") != "price" or not lv or st is None or tl is None or lv <= st:
+        return trigger, None
+    rr_at = round((tl - lv) / (lv - st), 2)
+    trigger = dict(trigger, reward_risk_at_level=rr_at, reward_risk_min=rr_min, meets_minimum=rr_at >= rr_min)
+    if not enforce_min or rr_at >= rr_min:
+        return trigger, None
+    if trigger.get("direction") == "below":
+        new = rr_level(tl, st, rr_min)
+        if st < new < lv:
+            note = (f"The Head's trigger (below Rs {lv:,.2f}) gives reward/risk {rr_at} to the low target Rs {tl:,.2f}, "
+                    f"under the minimum {rr_min}; code lowered it to Rs {new:,.2f}, where the minimum is met")
+            return dict(trigger, price_level=new, reward_risk_at_level=round((tl - new) / (new - st), 2), meets_minimum=True,
+                        set_by="code", head_level=lv,
+                        description=f"Price at or below Rs {new:,.2f}, where reward/risk to the target reaches {rr_min} "
+                                    f"(the Head proposed Rs {lv:,.2f}, where it is only {rr_at})"), note
+    return trigger, (f"The Head's trigger ({trigger.get('direction')} Rs {lv:,.2f}) gives reward/risk {rr_at} to the low "
+                     f"target, under the minimum {rr_min}: a buy at that level would fail the reward/risk rule unless "
+                     f"the targets are higher")
+
+
 def plan_valid(p: dict) -> list[str]:
     issues = []
     el, eh, st, tl, th = (p.get(k) for k in ("entry_low", "entry_high", "stop", "target_low", "target_high"))
@@ -431,7 +472,9 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
     is_buy = head.get("decision") == "buy"
     close = bundle.price.get("close")
     rr = reward_risk(plan["entry_low"], plan["entry_high"], plan["stop"], plan["target_low"])
-    calcs: dict = {"reward_risk": rr}
+    calcs: dict = {"reward_risk": rr,       # the rule's number: against the LOW target (conservative)
+                   "reward_risk_by_target": reward_risk_by_target(plan),
+                   "reward_risk_min": rc["vetoes"]["reward_risk"]["min_short_term"]}
     if is_buy:
         issues = plan_valid(plan)
         if issues:
@@ -521,16 +564,18 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
                                f"because: " + "; ".join(f"{r['rule']} ({r['result']})" for r in blocking))
 
     sizing = size_position(bundle, plan) if (actionable or on_hold) else None
-    if actionable and sizing and sizing.get("status") == "no_capital":
-        actionable, on_hold = False, "setup"           # capital not configured is setup, not a reason to wait
-        adjustments.append(f"Head proposed BUY; ON HOLD until setup is complete: {sizing.get('detail')}")
-    elif actionable and sizing and sizing.get("status") != "ok":
+    if actionable and sizing and sizing.get("status") != "ok":
         actionable = False
         final_decision = "wait"
         adjustments.append(f"Sizing: {sizing.get('detail')}")
 
+    rr_min = rc["vetoes"]["reward_risk"]["min_short_term"]
     if final_decision == "wait" and not trigger:
-        trigger = code_trigger(plan, blocking, rc["vetoes"]["reward_risk"]["min_short_term"])
+        trigger = code_trigger(plan, blocking, rr_min)
+    if final_decision == "wait" and trigger and trigger.get("kind") == "price":
+        trigger, note = check_price_trigger(trigger, plan, rr_min, enforce_min=bundle.horizon == "short")
+        if note:
+            adjustments.append(note)
     has_levels = plan.get("entry_low") is not None and plan.get("stop") is not None
     show_plan = (actionable or on_hold or final_decision == "wait") and (is_buy or (final_decision == "wait" and has_levels))
     missing = [i for i in gate["items"] if not i["ok"]]
@@ -547,33 +592,54 @@ def enforce(bundle: Bundle, pre: list[dict], head: dict, panel: dict) -> dict:
 
 
 def size_position(bundle: Bundle, plan: dict) -> dict:
-    """Whole-share sizing under the satellite caps and planned-loss-at-stop ceiling."""
+    """Position size and tranches as a % of your total capital — every limit in the rules is a
+    percentage, so no rupee amount is needed. When total_investment_capital_inr is configured, whole
+    share quantities and rupee amounts are added on top of the same plan."""
     u, a = config("user")["capital"], config("rules")["allocation"]
-    cap = u.get("total_investment_capital_inr")
-    if not cap:
-        return {"status": "no_capital", "detail": "total_investment_capital_inr not configured — research-only sizing."}
-    sat = cap * (1 - u.get("core_pct", a["core_pct_default"]) / 100)
+    stock_share = (100 - u.get("core_pct", a["core_pct_default"])) / 100   # part of capital in individual stocks
     price = plan["entry_high"]
-    risk_per_share = max(price - plan["stop"], price * a["min_risk_distance_pct"] / 100)
-    max_loss = cap * a["planned_loss_at_stop_pct_of_capital"] / 100
-    by_risk = max_loss / risk_per_share
-    by_cap = sat * a["satellite_max_per_stock_pct"] / 100 / price
-    qty = int(math.floor(min(by_risk, by_cap)))
-    value = qty * price
-    if qty <= 0 or value < sat * a["satellite_floor_pct"] / 100:
-        return {"status": "below_floor", "detail": f"Position Rs {value:,.0f} is below the {a['satellite_floor_pct']}% satellite floor."}
+    stop_dist_pct = (price - plan["stop"]) / price * 100
+    risk_pct = max(stop_dist_pct, a["min_risk_distance_pct"])               # min distance prevents oversized positions
+    loss_cap_pct = a["planned_loss_at_stop_pct_of_capital"]
+    by_risk = loss_cap_pct / risk_pct * 100                                 # % of capital
+    by_cap = a["satellite_max_per_stock_pct"] * stock_share                 # % of capital
+    floor = a["satellite_floor_pct"] * stock_share                          # % of capital
+    pos = min(by_risk, by_cap)
+    binding = "risk" if by_risk < by_cap else "per-stock cap"
+    if pos < floor:
+        return {"status": "below_floor",
+                "detail": f"Position would be {pos:.1f}% of capital (the {loss_cap_pct}% loss-at-stop limit with a "
+                          f"{risk_pct:.1f}% stop distance), below the {a['satellite_floor_pct']}% minimum of the stock "
+                          f"portion ({floor:.1f}% of capital) — the stop is too wide for this position."}
     tr = a["tranches_three"]
     levels = [plan["entry_high"], round((plan["entry_low"] + plan["entry_high"]) / 2, 2), plan["entry_low"]]
-    tranches, left = [], qty
-    for i, (pct, lv) in enumerate(zip(tr, levels)):
-        q = left if i == len(tr) - 1 else int(qty * pct / 100)
+    tranches = [{"tranche": f"T{i + 1}", "pct": pct, "pct_of_capital": round(pos * pct / 100, 2), "price": lv,
+                 "above_stop": lv > plan["stop"]} for i, (pct, lv) in enumerate(zip(tr, levels))]
+    out = {"status": "ok", "basis": "percent", "position_pct_of_capital": round(pos, 2),
+           "pct_of_stock_portion": round(pos / stock_share, 2) if stock_share else None,
+           "loss_at_stop_pct_of_capital": round(pos * stop_dist_pct / 100, 2), "max_loss_at_stop_pct_of_capital": loss_cap_pct,
+           "tranches": tranches, "binding_constraint": binding,
+           "note": "Loss at stop is not a maximum possible loss — gaps and slippage can exceed it."}
+    cap = u.get("total_investment_capital_inr")
+    if not cap:
+        out["detail"] = "Sized as % of your capital; set total_investment_capital_inr to also see share quantities."
+        return out
+    sat = cap * stock_share
+    qty = int(math.floor(cap * pos / 100 / price))
+    value = qty * price
+    if qty <= 0 or value < sat * a["satellite_floor_pct"] / 100:
+        return {"status": "below_floor", "detail": f"Position Rs {value:,.0f} is below the {a['satellite_floor_pct']}% "
+                                                   f"minimum of the stock portion (whole shares at Rs {price:,.2f})."}
+    left = qty
+    for i, t in enumerate(tranches):
+        q = left if i == len(tranches) - 1 else int(qty * t["pct"] / 100)
         left -= q
-        tranches.append({"tranche": f"T{i + 1}", "pct": pct, "price": lv, "qty": q, "above_stop": lv > plan["stop"]})
-    return {"status": "ok", "qty": qty, "value_inr": round(value, 2), "satellite_inr": round(sat, 2),
-            "pct_of_satellite": round(value / sat * 100, 2),
-            "planned_loss_at_stop_inr": round(qty * (price - plan["stop"]), 2), "max_planned_loss_inr": round(max_loss, 2),
-            "tranches": tranches, "binding_constraint": "risk" if by_risk < by_cap else "per-stock cap",
-            "note": "Planned loss at stop is not a maximum possible loss — gaps and slippage can exceed it."}
+        t["qty"] = q
+    out.update({"basis": "capital", "qty": qty, "value_inr": round(value, 2), "satellite_inr": round(sat, 2),
+                "pct_of_satellite": round(value / sat * 100, 2),
+                "planned_loss_at_stop_inr": round(qty * (price - plan["stop"]), 2),
+                "max_planned_loss_inr": round(cap * loss_cap_pct / 100, 2)})
+    return out
 
 
 def consistency(final: dict, head: dict) -> dict:
@@ -586,12 +652,17 @@ def consistency(final: dict, head: dict) -> dict:
         issues += plan_valid(fa["plan"] or {})
         sz = fa.get("sizing") or {}
         if sz.get("status") == "ok":
-            if sum(t["qty"] for t in sz["tranches"]) != sz["qty"]:
-                issues.append("Tranche quantities do not sum to the position")
+            if sum(t["pct"] for t in sz["tranches"]) != 100:
+                issues.append("Tranche shares do not add up to 100% of the position")
             if not all(t["above_stop"] for t in sz["tranches"]):
                 issues.append("A tranche is not above the stop")
-            if sz["planned_loss_at_stop_inr"] > sz["max_planned_loss_inr"] + 1e-6:
-                issues.append("Planned loss at stop exceeds the configured ceiling")
+            if sz["loss_at_stop_pct_of_capital"] > sz["max_loss_at_stop_pct_of_capital"] + 1e-6:
+                issues.append("Loss at stop exceeds the configured % of capital")
+            if "qty" in sz:
+                if sum(t["qty"] for t in sz["tranches"]) != sz["qty"]:
+                    issues.append("Tranche quantities do not sum to the position")
+                if sz["planned_loss_at_stop_inr"] > sz["max_planned_loss_inr"] + 1e-6:
+                    issues.append("Planned loss at stop exceeds the configured ceiling")
     if head.get("decision") == "buy" and not fa["actionable"] and not final["adjustments"]:
         issues.append("Buy proposal not actionable but no rule adjustment recorded")
     if fa["decision"] in ("avoid", "insufficient_data") and fa.get("plan"):
